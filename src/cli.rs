@@ -288,6 +288,7 @@ pub struct CliCfg {
     /// String to use for NULL fields
     pub null: String,
 
+    #[allow(non_snake_case)]
     #[structopt(long = "ISO-8859", name = "ISO_8859")]
     /// Normally UTF8 is used for character decoding, but overrides that to Latin-1 or ISO-8859 character decoding.
     ///
@@ -312,11 +313,11 @@ pub struct CliCfg {
 
     #[structopt(long = "head", name = "head")]
     /// Only write first X records
-    pub head: Option<(u64)>,
+    pub head: Option<u64>,
 
     #[structopt(long = "tail", name = "tail")]
     /// Only write first X records
-    pub tail: Option<(u64)>,
+    pub tail: Option<u64>,
 
     #[structopt(long = "count_dsc", name = "count_dsc", conflicts_with="count_asc")]
     /// Sort output with descending counts
@@ -328,11 +329,11 @@ pub struct CliCfg {
 
     #[structopt(long = "count_ge", name = "count_ge")]
     /// Only write records with count greater than or equal to X  (>=X)
-    pub count_le: Option<(u64)>,
+    pub count_le: Option<u64>,
 
     #[structopt(long = "count_le", name = "count_le")]
     /// Only write records with count less than or equal to X  (>=X)
-    pub count_ge: Option<(u64)>,
+    pub count_ge: Option<u64>,
 
     #[structopt(short = "E", long = "print_examples")]
     /// Prints example usage scenarious - extra help

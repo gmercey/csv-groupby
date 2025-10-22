@@ -4,7 +4,6 @@ use crate::cli::CliCfg;
 //use regex::Regex;
 
 use pcre2::bytes::{CaptureLocations, Captures, Regex};
-use regex::internal::Input;
 use std::ops::Index;
 use std::sync::atomic::compiler_fence;
 

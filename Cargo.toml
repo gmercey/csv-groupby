@@ -1,9 +1,10 @@
 [package]
 build = "build.rs"
-edition = '2018'
+edition = '2021'
 name = "csv-groupby"
 version = "0.10.1"
 authors = ["Steve Flanagan"]
+rust-version = "1.90"
 
 description="execute a sql-like group-by on arbitrary text or csv files"
 

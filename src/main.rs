@@ -175,7 +175,7 @@ fn type_name_of<T: core::any::Any>(_t: &T) -> &str {
 
 fn csv() -> Result<(), Box<dyn std::error::Error>> {
     
-    let mut phase = Arc::new(AtomicIsize::new(ProcPhase::SETUP as isize));
+    let phase = Arc::new(AtomicIsize::new(ProcPhase::SETUP as isize));
 
     let start_f = Instant::now();
     let startcpu = ProcessTime::now();
@@ -545,7 +545,7 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
         let mut line_count = 0u64;
         let total_lines_expected = thekeys.len() as u64;
         if !cfg.csv_output {
-            let mut print_skipped = false; // for the stuff after head and before tail
+            let _print_skipped = false; // for the stuff after head and before tail
             let mut celltable = Table::new();
             celltable.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
             {
@@ -810,7 +810,7 @@ fn worker_re(send_blocks: &crossbeam_channel::Sender<Vec<u8>>, cfg: &CliCfg, rec
         Ok((map, lines, fields, fieldskipped, lines_skipped)) => (map, lines, fields, fieldskipped, lines_skipped),
         Err(e) => {
             let err_msg = format!("Unable to process inner file - likely compressed or not UTF8 text: {}", e);
-            panic!(err_msg);
+            panic!("{}", err_msg);
         }
     }
 }
@@ -892,7 +892,7 @@ fn _worker_re(
                 &fc.block[0..fc.len]
             };
 
-            'LINE_LOOP: for (inner_count, line) in slice.split(|c| *c == b'\n').enumerate() {
+            'LINE_LOOP: for (_inner_count, line) in slice.split(|c| *c == b'\n').enumerate() {
                 let line = match std::str::from_utf8(&line) {
                     Err(e) => {
                         ascii_line_fixup_full(line, &mut err_line_fix);
@@ -957,7 +957,7 @@ fn worker_csv(send_blocks: &crossbeam_channel::Sender<Vec<u8>>, cfg: &CliCfg, re
         Ok((map, lines, fields, fieldskipped, lines_skipped)) => (map, lines, fields, fieldskipped, lines_skipped),
         Err(e) => {
             let err_msg = format!("Unable to process inner block - likely compressed or not UTF8 text: {}", e);
-            panic!(err_msg);
+            panic!("{}", err_msg);
         }
     }
 }
@@ -1036,7 +1036,7 @@ fn _worker_csv(
                         }
                         Err(e) => {
                             match e.kind() {
-                                csv::ErrorKind::Utf8 { ref err, pos } => {
+                                csv::ErrorKind::Utf8 { err: _, pos } => {
                                     if let Some(pos) = pos {
                                         ascii_line_fixup(&fc.block, pos.byte() as usize, &mut err_line_fix);
                                         eprintln!("skipping line due to bad UTF8 codes in file (try ISO-8859 option)\n\tline:{}", &err_line_fix);
@@ -1070,7 +1070,7 @@ fn _worker_csv(
                         }
                         Err(e) => {
                             match e.kind() {
-                                csv::ErrorKind::Utf8 { ref err, pos } => {
+                                csv::ErrorKind::Utf8 { err: _, pos } => {
                                     if let Some(pos) = pos {
                                         ascii_line_fixup(&fc.block, pos.byte() as usize, &mut err_line_fix);
                                         eprintln!("skipping line due to bad UTF8 codes in file (try ISO-8859 option)\n\tline:{}", &err_line_fix);
@@ -1098,7 +1098,7 @@ fn worker_multi_re(send_blocks: &crossbeam_channel::Sender<Vec<u8>>, cfg: &CliCf
         Ok((map, lines, fields, fieldskipped, lines_skipped)) => (map, lines, fields, fieldskipped, lines_skipped),
         Err(e) => {
             let err_msg = format!("Unable to process inner file - likely compressed or not UTF8 text: {}", e);
-            panic!(err_msg);
+            panic!("{}", err_msg);
         }
     }
 }
@@ -1264,7 +1264,7 @@ fn ascii_line_fixup(slice: &[u8], start: usize, str: &mut String) {
     let mut pos = start;
     str.clear();
     loop {
-        let mut b = slice[pos];
+    let b = slice[pos];
         if b == 10 || b == 11 {
             break;
         } else if b > 127 {

@@ -12,14 +12,22 @@ use pcre2::bytes::{Captures as Captures_pcre2, Regex as Regex_pre2};
 use std::fs::File;
 use flate2::read::GzDecoder;
 
+// Cross-platform lightweight thread id helper. On Linux use gettid syscall; on other Unix fall back
+// to pthread_self (sufficient for diagnostic logging). On Windows use GetCurrentThreadId.
 #[cfg(target_os = "windows")]
 pub fn gettid() -> usize {
     unsafe { winapi::um::processthreadsapi::GetCurrentThreadId() as usize }
 }
 
-#[cfg(any(not(target_os = "windows")))]
+#[cfg(all(unix, target_os = "linux"))]
 pub fn gettid() -> usize {
     unsafe { libc::syscall(libc::SYS_gettid) as usize }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn gettid() -> usize {
+    // pthread_self returns a pthread_t which we cast to usize for logging purposes only.
+    unsafe { libc::pthread_self() as usize }
 }
 
 #[allow(dead_code)]

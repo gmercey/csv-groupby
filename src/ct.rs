@@ -1,4 +1,4 @@
-use std::{io::{stdout, Write}, time::Duration};
+use std::{io::{Write}, time::Duration};
 
 use crossterm::{terminal::Clear, terminal::ClearType::CurrentLine, style::{Color, ResetColor, SetForegroundColor}};
 
