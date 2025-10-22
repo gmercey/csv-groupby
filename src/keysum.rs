@@ -170,10 +170,11 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
         }
     }
 
-    if !cfg.key_fields.is_empty() {
+    let key_fields_guard = cfg.key_fields();
+    if !key_fields_guard.is_empty() {
         fieldcount += rec_len;
-        for i in 0..cfg.key_fields.len() {
-            let index = cfg.key_fields[i];
+        for i in 0..key_fields_guard.len() {
+            let index = key_fields_guard[i];
             if index < rec_len {
                 // re.is_match(&record[index].as_ref().as_bytes());
                 ss.push_str(record[index].as_ref());

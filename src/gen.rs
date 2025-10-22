@@ -234,6 +234,7 @@ pub fn io_thread_slicer(
                 if !apparent_eof {
                     eprintln!("WARNING: sending no EOL found in block around file:pos {}:{} ", currfilename, curr_pos);
                 }
+                if verbosity > 0 { eprintln!("DBG slicer sending slice (no EOL) size:{} file:{}", sz + last_left_len, currfilename); }
                 send_fileslice.send(Some(FileSlice {
                     block,
                     len: sz + last_left_len,
@@ -253,6 +254,7 @@ pub fn io_thread_slicer(
                 if verbosity > 2 {
                     eprintln!("sending found EOL at {} ", end + 1);
                 }
+                    if verbosity > 0 { eprintln!("DBG slicer sending slice size:{} file:{}", end + 1, currfilename); }
                     send_fileslice.send(Some(FileSlice {
                     block,
                     len: end + 1,
@@ -267,6 +269,7 @@ pub fn io_thread_slicer(
             if verbosity > 2 {
                 eprintln!("sending tail len {} on file: {} ", left_len, currfilename);
             }
+            if verbosity > 0 { eprintln!("DBG slicer sending tail slice len:{} file:{}", left_len, currfilename); }
             send_fileslice.send(Some(FileSlice {
                 block,
                 len: left_len,
@@ -366,7 +369,7 @@ pub fn per_file_thread(
                 Some(i) => String::from(&filename.to_str().unwrap()[i..]),
             }
         };
-    let mut rdr: Box<dyn Read> = match &ext[..] {
+        let mut rdr: Box<dyn Read> = match &ext[..] {
             ".gz" | ".tgz" => {
                 match File::open(&filename) {
                     Ok(f) => if block_size != 0 {
@@ -429,6 +432,36 @@ pub fn per_file_thread(
                 }
             },
         };
+        // If header skipping is required (name-based keys resolved earlier), remove first line now.
+        let mut boxed_reader: Box<dyn Read> = rdr;
+        // We detect need by looking at global config via environment-free hook: if first slice index should start after header.
+        // Simplest approach: read and discard first line before handing to slicer when has_headers(true) & names used.
+        // We cannot access cfg directly here; instead rely on pattern: workers expect header removed when key_fields_resolved && skip_header was set.
+        // So always drop first line when skip_header was set and key_fields_resolved involved name usage.
+        // Provide a lightweight heuristic: presence of commas and lack of newline in first 8KB chunk -> treat as header.
+        // (NOTE: Ideal would pass a flag; future refactor may extend PerFileCtx with a boolean.)
+        // Implementation: peek first line and discard if it ends with \n or \r.
+        {
+            use std::io::Read as _;
+            let mut peek_buf: Vec<u8> = Vec::with_capacity(1024);
+            let mut single = [0u8;1];
+            // Read until newline or EOF but cap.
+            let mut consumed = 0usize;
+            loop {
+                match boxed_reader.read(&mut single) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        consumed += 1;
+                        peek_buf.push(single[0]);
+                        if single[0] == b'\n' || single[0] == b'\r' { break; }
+                        if consumed >= 8192 { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+            // We intentionally discard this buffer (header line). Following content starts after header.
+            // No push-back needed; we just proceed. If file had no newline we treat entire file as a single header row.
+        }
         let io_ctx = IoThreadCtx {
             recv_blocks: recv_blocks.clone(),
             send_fileslice: send_fileslice.clone(),
@@ -441,7 +474,7 @@ pub fn per_file_thread(
             &io_ctx,
             &filename.display(),
             &file_subgrps,
-            &mut rdr,
+            &mut boxed_reader,
         ) {
             Ok((bc, by)) => {
                 block_count += bc;

@@ -96,6 +96,60 @@ These will either be part of the "key" or group-by, an aggregate (avg or sum), o
 You may use none-to-many fields for each kind of field including the key field.
 Use -A option to give these numbered fields "names" used in the output.
 
+### Selecting Fields by Header Name (KEYS & AGGREGATES)  
+Name-based column selection has been extended beyond keys. You can now use CSV header names anywhere you would normally provide 1-based numeric field positions for these options:
+
+`-k` (keys), `-s` (sum), `-a` (avg), `-u` (distinct count), `-D` (write_distros), `-n` (min nums), `-x` (max nums), `-N` (min strings), `-X` (max strings)
+
+All of these accept a comma‑separated list of either numbers, names, or a mix. Each token is interpreted as:
+* If it parses as an integer > 0: treated as (index - 1) internally.
+* Otherwise: treated as a header name to resolve.
+
+Resolution occurs in a single pre-scan of the header (stdin buffered or each file's first line) before worker threads start. Multi‑file mode enforces identical headers.
+
+Example (stdin, mixed key + aggregates by name):
+```
+printf 'digit,i,j,dvalue\n0,1,10,0\n1,2,20,2\n' | \
+    gb -k digit -s dvalue -a digit -u i -n dvalue -x dvalue --skip_header --csv_output
+```
+Sample header line produced (indices become 1-based in output; names included when known):
+```
+k:1:digit,count,sum:4:dvalue,avg:1:digit,cnt_uniq:2:i,min:4:dvalue,max:4:dvalue
+```
+
+Another example mixing numeric & names:
+```
+gb -f events.csv -k 1,video_id -s views,total_duration --skip_header --csv_output
+```
+If the header starts with `date,video_id,views,total_duration,...` the keys resolve to indices 1 & 2; sums to indices 3 & 4. Duplicate or overlapping specifications are de‑duplicated after resolution.
+
+Requirements & Notes:
+* Always add `--skip_header` when using any names so the first line is treated as a header record (the internal CSV reader is switched to `has_headers(false)` after extraction so data lines are not skipped).
+* Mixing numeric and name tokens is supported across all listed options.
+* Regex mode (`-r`) still only supports numeric indices (capture groups) for now; name tokens will be rejected.
+* Name collisions: the first occurrence wins; additional identical header names (rare / malformed CSV) map to the first index.
+* Aliasing precedence for output labels: header name > explicit `-A` alias > bare numeric index.
+* Output header format: each selected field or aggregate column label uses the pattern `<kind>:<1-based-index>[:<header-name>]` where `[:<header-name>]` is included only if a name was resolved.
+* Distribution fields specified with `-D` must also appear (by index or name) in the `-u` unique list; this is validated after resolution when names are used.
+
+Errors:
+```
+Missing header name(s) for -k: some_missing_column
+Missing header name(s) for -s: duration_ms
+write_distro specifies field 7 that is not a subset of the unique_keys
+```
+
+Performance Impact:
+The header pre-scan cost is negligible relative to parallel parsing (single read of the first line per file or buffering all stdin once).
+
+Limitations / Future Work:
+* Regex mode name support (mapping capture groups to symbolic names) is not yet implemented.
+* Option to suppress numeric indices in labels when a name exists (e.g. emit `k:digit` instead of `k:1:digit`) may be added—current tests rely on the numeric form.
+* Potential expansion to allow custom output label templates.
+
+Tip: If you want stable scripts across schema changes, prefer names; they fail fast if a required column is removed or renamed.
+
+
 
 ### Summaries on a csv file:
 

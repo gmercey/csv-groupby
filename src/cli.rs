@@ -1,11 +1,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use pcre2::bytes::Regex;
 
 use lazy_static::lazy_static;
 use clap::{Parser, ArgAction};
 use std::str::FromStr;
+use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use pcre2::bytes::{CaptureLocations as CaptureLocations_pcre2, Captures as Captures_pcre2, Regex as Regex_pre2};
 
@@ -35,7 +38,7 @@ lazy_static! {
         env!("CARGO_PKG_VERSION"), env!("BUILD_GIT_HASH"));
 }
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug)]
 #[command(version = BUILD_INFO.as_str(), rename_all = "kebab-case")]
 /// Execute a sql-like group-by on arbitrary text or csv files. Field indices start at 1.
 ///
@@ -44,17 +47,44 @@ lazy_static! {
 pub struct CliCfg {
     #[arg(short='R', long="test_re")] pub testre: Option<String>,
     #[arg(short='L', long="test_line")] pub testlines: Vec<String>,
-    #[arg(short='k', long="key_fields", value_delimiter=',')] pub key_fields: Vec<usize>,
-    #[arg(short='u', long="unique_values", value_delimiter=',')] pub unique_fields: Vec<usize>,
-    #[arg(short='D', long="write_distros", value_delimiter=',')] pub write_distros: Vec<usize>,
+    // Overloaded key field selectors: numeric indices (1-based) OR header names.
+    // Parsed initially as raw strings; resolved later (lazy) after header read.
+    #[arg(short='k', long="key_fields", value_delimiter=',')] pub raw_key_fields: Vec<String>,
+    // INTERNAL (initialized post-parse)
+    #[clap(skip)] pub key_fields_idx: RwLock<Vec<usize>>,
+    #[clap(skip)] pub key_field_names: Vec<String>,
+    #[clap(skip)] pub key_fields_resolved: AtomicBool,
+    #[clap(skip)] pub key_index_names: RwLock<HashMap<usize,String>>, // map of resolved index -> header name
+    // Unique values (distinct counts) support numeric indices OR header names
+    #[arg(short='u', long="unique_values", value_delimiter=',')] pub raw_unique_fields: Vec<String>,
+    #[clap(skip)] pub unique_fields: Vec<usize>,
+    #[clap(skip)] pub unique_field_names: Vec<String>,
+    // Distribution write-out fields (subset of unique fields) allow names too
+    #[arg(short='D', long="write_distros", value_delimiter=',')] pub raw_write_distros: Vec<String>,
+    #[clap(skip)] pub write_distros: Vec<usize>,
+    #[clap(skip)] pub write_distro_field_names: Vec<String>,
     #[arg(long="write_distros_upper", default_value_t=5)] pub write_distros_upper: usize,
     #[arg(long="write_distros_bottom", default_value_t=2)] pub write_distros_bottom: usize,
-    #[arg(short='s', long="sum_values", value_delimiter=',')] pub sum_fields: Vec<usize>,
-    #[arg(short='a', long="avg_values", value_delimiter=',')] pub avg_fields: Vec<usize>,
-    #[arg(short='x', long="max_nums", value_delimiter=',')] pub max_num_fields: Vec<usize>,
-    #[arg(short='n', long="min_nums", value_delimiter=',')] pub min_num_fields: Vec<usize>,
-    #[arg(short='X', long="max_strings", value_delimiter=',')] pub max_str_fields: Vec<usize>,
-    #[arg(short='N', long="min_strings", value_delimiter=',')] pub min_str_fields: Vec<usize>,
+    // Aggregates: allow numeric indices OR header names (resolved post header like keys)
+    #[arg(short='s', long="sum_values", value_delimiter=',')] pub raw_sum_fields: Vec<String>,
+    #[arg(short='a', long="avg_values", value_delimiter=',')] pub raw_avg_fields: Vec<String>,
+    #[clap(skip)] pub sum_fields: Vec<usize>,
+    #[clap(skip)] pub avg_fields: Vec<usize>,
+    #[clap(skip)] pub sum_field_names: Vec<String>,
+    #[clap(skip)] pub avg_field_names: Vec<String>,
+    // Numeric min/max; string min/max: support names
+    #[arg(short='x', long="max_nums", value_delimiter=',')] pub raw_max_num_fields: Vec<String>,
+    #[clap(skip)] pub max_num_fields: Vec<usize>,
+    #[clap(skip)] pub max_num_field_names: Vec<String>,
+    #[arg(short='n', long="min_nums", value_delimiter=',')] pub raw_min_num_fields: Vec<String>,
+    #[clap(skip)] pub min_num_fields: Vec<usize>,
+    #[clap(skip)] pub min_num_field_names: Vec<String>,
+    #[arg(short='X', long="max_strings", value_delimiter=',')] pub raw_max_str_fields: Vec<String>,
+    #[clap(skip)] pub max_str_fields: Vec<usize>,
+    #[clap(skip)] pub max_str_field_names: Vec<String>,
+    #[arg(short='N', long="min_strings", value_delimiter=',')] pub raw_min_str_fields: Vec<String>,
+    #[clap(skip)] pub min_str_fields: Vec<usize>,
+    #[clap(skip)] pub min_str_field_names: Vec<String>,
     #[arg(short='A', long="field_aliases", value_delimiter=',', value_parser=parse_alias)] pub field_aliases: Option<Vec<(usize,String)>>,
     #[arg(short='r', long="regex")] pub re_str: Vec<String>,
     #[arg(short='p', long="path_re")] pub re_path: Option<String>,
@@ -222,9 +252,10 @@ fn add_n_check(indices: &mut [usize], comment: &str) -> Result<()> {
         }
         last = x;
     }
+    // Indices for numeric entries are converted to 0-based immediately when parsed.
+    // Do NOT subtract again here (was causing off-by-one / zero errors in tests).
     for x in indices.iter_mut() {
-        if *x == 0 { Err(format!("Field indices must be 1 or greater - using base 1 indexing, got a {} for option {}", *x, comment))?; }
-        *x -= 1;
+        if *x == usize::MAX { Err(format!("Invalid index overflow for option {}", comment))?; }
     }
     Ok(())
 }
@@ -254,15 +285,87 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
             Ok(v - 1)
         }
 
-        add_n_check(&mut cfg.key_fields, "-k")?;
+        // --- key fields custom parsing (support names) ---
+        {
+            let mut numeric: Vec<usize> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
+            for tok in &cfg.raw_key_fields {
+                let t = tok.trim();
+                if t.is_empty() { continue; }
+                match t.parse::<usize>() {
+                    Ok(v) => {
+                        if v == 0 { Err("Field indices must start at base 1".to_string())?; }
+                        numeric.push(v - 1);
+                    }
+                    Err(_) => {
+                        names.push(t.to_string());
+                    }
+                }
+            }
+            // uniqueness for numeric portion
+            if !numeric.is_empty() {
+                let mut sorted = numeric.clone();
+                sorted.sort_unstable();
+                let mut last = usize::MAX;
+                for x in &sorted { if *x == last { Err(format!("Field indices must be unique per purpose. Field position {} appears more than once for option -k", x+1))?; } last = *x; }
+            }
+            // early checks for name usage
+            if !names.is_empty() {
+                if cfg.re_str.len() > 0 {
+                    Err("Header name selectors (-k) are not supported in regex mode yet; use numeric indices.".to_string())?;
+                }
+                if !cfg.skip_header {
+                    Err("Name-based key selectors require --skip_header so the first line is treated as the header.".to_string())?;
+                }
+            }
+            // initialize fields
+            cfg.key_fields_idx = RwLock::new(numeric);
+            cfg.key_field_names = names.clone();
+            cfg.key_fields_resolved = AtomicBool::new(names.is_empty());
+            cfg.key_index_names = RwLock::new(HashMap::new());
+        }
+        // Common helper for parsing mixed numeric/name lists for all aggregate-like options
+        {
+            let parse_named = |raw: &Vec<String>, dest_idx: &mut Vec<usize>, dest_names: &mut Vec<String>, opt: &str| -> Result<()> {
+                for tok in raw {
+                    let t = tok.trim();
+                    if t.is_empty() { continue; }
+                    match t.parse::<usize>() {
+                        Ok(v) => {
+                            if v == 0 { Err(format!("Field indices must start at base 1 for option {}", opt))?; }
+                            dest_idx.push(v-1);
+                        }
+                        Err(_) => dest_names.push(t.to_string()),
+                    }
+                }
+                // uniqueness on numeric
+                if !dest_idx.is_empty() {
+                    let mut sorted = dest_idx.clone();
+                    sorted.sort_unstable();
+                    let mut last = usize::MAX;
+                    for x in &sorted { if *x == last { Err(format!("Field indices must be unique for option {} at position {}", opt, x+1))?; } last = *x; }
+                }
+                Ok(())
+            };
+            // --- sum & avg fields parsing (support names) ---
+            parse_named(&cfg.raw_sum_fields, &mut cfg.sum_fields, &mut cfg.sum_field_names, "-s")?;
+            parse_named(&cfg.raw_avg_fields, &mut cfg.avg_fields, &mut cfg.avg_field_names, "-a")?;
+            // --- unique / distros ---
+            parse_named(&cfg.raw_unique_fields, &mut cfg.unique_fields, &mut cfg.unique_field_names, "-u")?;
+            parse_named(&cfg.raw_write_distros, &mut cfg.write_distros, &mut cfg.write_distro_field_names, "-D")?;
+            // --- min/max numeric/string ---
+            parse_named(&cfg.raw_min_num_fields, &mut cfg.min_num_fields, &mut cfg.min_num_field_names, "-n")?;
+            parse_named(&cfg.raw_max_num_fields, &mut cfg.max_num_fields, &mut cfg.max_num_field_names, "-x")?;
+            parse_named(&cfg.raw_min_str_fields, &mut cfg.min_str_fields, &mut cfg.min_str_field_names, "-N")?;
+            parse_named(&cfg.raw_max_str_fields, &mut cfg.max_str_fields, &mut cfg.max_str_field_names, "-X")?;
+        }
+        // numeric validation (already 0-based). Name-based portions resolved later.
         add_n_check(&mut cfg.sum_fields, "-s")?;
         add_n_check(&mut cfg.avg_fields, "-a")?;
-
         add_n_check(&mut cfg.max_num_fields, "-x")?;
         add_n_check(&mut cfg.max_str_fields, "-X")?;
         add_n_check(&mut cfg.min_num_fields, "-n")?;
         add_n_check(&mut cfg.min_str_fields, "-N")?;
-
         add_n_check(&mut cfg.unique_fields, "-u")?;
         add_n_check(&mut cfg.write_distros, "--write_distros")?;
 
@@ -272,14 +375,14 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
         for re in &cfg.re_str {
             if let Err(err) = Regex::new(re) { Err(err)? }
         }
-        {
+        // write_distros subset validation for pure-numeric case (name-based validated after resolution)
+        if cfg.write_distro_field_names.is_empty() && cfg.unique_field_names.is_empty() {
             if cfg.write_distros.len() > cfg.unique_fields.len() {
-                Err("write_distro fields must be subsets of -u [unique fields]")?
+                Err("write_distro fields must be subsets of -u [unique fields]")?;
             }
-
             for x in &cfg.write_distros {
                 if !cfg.unique_fields.contains(x) {
-                    Err(format!("write_distro specifies field {} that is not a subset of the unique_keys", x))?
+                    Err(format!("write_distro specifies field {} that is not a subset of the unique_keys", x))?;
                 }
             }
         }
@@ -288,7 +391,15 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
         } else if cfg.verbose > 1 {
             eprintln!("CLI options: {:#?}", cfg);
         }
-        if cfg.testre.is_none() && cfg.key_fields.is_empty() && cfg.sum_fields.is_empty() && cfg.avg_fields.is_empty() && cfg.unique_fields.is_empty() {
+        if cfg.testre.is_none()
+            && cfg.key_field_names.is_empty()
+            && cfg.key_fields_idx.read().unwrap().is_empty()
+            && cfg.sum_fields.is_empty() && cfg.avg_fields.is_empty() && cfg.unique_fields.is_empty()
+            && cfg.sum_field_names.is_empty() && cfg.avg_field_names.is_empty()
+            && cfg.unique_field_names.is_empty() && cfg.max_num_fields.is_empty() && cfg.min_num_fields.is_empty()
+            && cfg.max_str_fields.is_empty() && cfg.min_str_fields.is_empty()
+            && cfg.max_num_field_names.is_empty() && cfg.min_num_field_names.is_empty()
+            && cfg.max_str_field_names.is_empty() && cfg.min_str_field_names.is_empty() {
             Err("No work to do! - you should specify at least one or more field options or a testre")?;
         }
     if cfg.re_path.is_some() {
@@ -308,5 +419,80 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
     });
 
     Ok(cfg)
+}
+
+impl CliCfg {
+    pub fn key_fields(&self) -> RwLockReadGuard<'_, Vec<usize>> { self.key_fields_idx.read().unwrap() }
+    pub fn resolve_key_field_names(&mut self, headers: &csv::StringRecord) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        if self.key_fields_resolved.load(AtomicOrdering::Relaxed) { return Ok(()); }
+        let mut map = std::collections::HashMap::<&str, usize>::new();
+        for (i, h) in headers.iter().enumerate() { map.entry(h).or_insert(i); }
+        let mut missing: Vec<String> = Vec::new();
+        let mut resolved: Vec<usize> = Vec::new();
+    let key_names_snapshot = self.key_field_names.clone();
+        for name in &key_names_snapshot {
+            match map.get(name.as_str()) {
+                Some(idx) => {
+                    resolved.push(*idx);
+                    // record mapping idx -> name
+                    self.key_index_names.write().unwrap().insert(*idx, name.clone());
+                },
+                None => missing.push(name.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            Err(format!("Missing header name(s) for -k: {}", missing.join(", ")))?;
+        }
+        {
+            // Append resolved names to existing numeric indices under lock then drop lock.
+            let mut guard = self.key_fields_idx.write().unwrap();
+            guard.extend(resolved);
+            guard.sort_unstable();
+            guard.dedup();
+        }
+        self.key_fields_resolved.store(true, AtomicOrdering::Relaxed);
+        // Resolve aggregate field names after releasing key_fields lock to avoid borrow conflicts.
+        let sum_names_snapshot = self.sum_field_names.clone();
+        resolve_numeric_name_list(headers, &sum_names_snapshot, &mut self.sum_fields, &self.key_index_names, "-s")?;
+        let avg_names_snapshot = self.avg_field_names.clone();
+        resolve_numeric_name_list(headers, &avg_names_snapshot, &mut self.avg_fields, &self.key_index_names, "-a")?;
+        let uniq_names_snapshot = self.unique_field_names.clone();
+        resolve_numeric_name_list(headers, &uniq_names_snapshot, &mut self.unique_fields, &self.key_index_names, "-u")?;
+        let wdist_names_snapshot = self.write_distro_field_names.clone();
+        resolve_numeric_name_list(headers, &wdist_names_snapshot, &mut self.write_distros, &self.key_index_names, "-D")?;
+        let min_num_names_snapshot = self.min_num_field_names.clone();
+        resolve_numeric_name_list(headers, &min_num_names_snapshot, &mut self.min_num_fields, &self.key_index_names, "-n")?;
+        let max_num_names_snapshot = self.max_num_field_names.clone();
+        resolve_numeric_name_list(headers, &max_num_names_snapshot, &mut self.max_num_fields, &self.key_index_names, "-x")?;
+        let min_str_names_snapshot = self.min_str_field_names.clone();
+        resolve_numeric_name_list(headers, &min_str_names_snapshot, &mut self.min_str_fields, &self.key_index_names, "-N")?;
+        let max_str_names_snapshot = self.max_str_field_names.clone();
+        resolve_numeric_name_list(headers, &max_str_names_snapshot, &mut self.max_str_fields, &self.key_index_names, "-X")?;
+        // After resolving write distros ensure they are subset of unique fields
+        for wd in &self.write_distros { if !self.unique_fields.contains(wd) { Err(format!("write_distro specifies field {} that is not a subset of the unique_keys", wd))?; } }
+        Ok(())
+    }
+}
+
+fn resolve_numeric_name_list(headers: &csv::StringRecord, names: &Vec<String>, dest: &mut Vec<usize>, name_map: &RwLock<HashMap<usize,String>>, opt: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    if names.is_empty() { return Ok(()); }
+    let mut map = std::collections::HashMap::<&str, usize>::new();
+    for (i,h) in headers.iter().enumerate() { map.entry(h).or_insert(i); }
+    let mut missing = Vec::<String>::new();
+    let mut resolved: Vec<usize> = Vec::new();
+    for name in names {
+        match map.get(name.as_str()) {
+            Some(idx) => {
+                resolved.push(*idx);
+                name_map.write().unwrap().insert(*idx, name.clone());
+            },
+            None => missing.push(name.clone()),
+        }
+    }
+    if !missing.is_empty() { Err(format!("Missing header name(s) for {}: {}", opt, missing.join(", "))) ?; }
+    dest.extend(resolved);
+    dest.sort_unstable();
+    dest.dedup();
+    Ok(())
 }
 

@@ -185,7 +185,7 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
     let startcpu = ProcessTime::now();
 
 
-    let cfg = get_cli()?;
+    let mut cfg = get_cli()?;
 
     if cfg.verbose >= 1 {
         eprintln!("Global allocator / tracker: {}", type_name_of(&GLOBAL_TRACKER));
@@ -228,7 +228,108 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // start processing threads
+    // --------------------------------------------------------------------------------------------
+    // Header pre-scan (Option B): resolve name-based key fields BEFORE spawning worker threads.
+    // This ensures workers see a finalized index list and avoids any data race on resolution.
+    // --------------------------------------------------------------------------------------------
+    // Buffer holding stdin content after header for name-based mode
+    let mut stdin_post_header: Option<Vec<u8>> = None;
+    if cfg.skip_header && !cfg.key_field_names.is_empty() && !cfg.key_fields_resolved.load(std::sync::atomic::Ordering::Relaxed) {
+        if do_stdin {
+            // Read entire stdin into memory to safely separate header and data (avoids mixed buffered states).
+            use std::io::Read;
+            let mut all = Vec::<u8>::with_capacity(64 * 1024);
+            std::io::stdin().read_to_end(&mut all)?;
+            // Find first newline (either \n or \r) as header terminator.
+            let mut header_end = None;
+            for (i, b) in all.iter().enumerate() {
+                if *b == b'\n' || *b == b'\r' { header_end = Some(i); break; }
+            }
+            let header_slice = match header_end { Some(end) => &all[0..end], None => &all[..] };
+            if header_slice.is_empty() { return Err("Empty input: cannot resolve header names".into()); }
+            let mut builder = create_csv_builder(&cfg);
+            builder.has_headers(false);
+            let mut header_reader = builder.from_reader(header_slice);
+            match header_reader.records().next() {
+                Some(Ok(rec)) => {
+                    if let Some(c) = Arc::get_mut(&mut cfg) {
+                        c.resolve_key_field_names(&rec)?;
+                    } else {
+                        return Err("Internal error: cfg already shared before header resolution".into());
+                    }
+                },
+                Some(Err(e)) => return Err(format!("Unable to parse header line: {}", e).into()),
+                None => return Err("Unable to obtain header record for name resolution".into()),
+            }
+            // Remainder after header (skip potential single \n/\r and following optional \n for CRLF)
+            let mut data_start = header_end.unwrap_or(all.len());
+            if data_start < all.len() && (all[data_start] == b'\n' || all[data_start] == b'\r') { data_start += 1; }
+            if data_start < all.len() && all[data_start-1] == b'\r' && all[data_start] == b'\n' { data_start += 1; }
+            stdin_post_header = Some(all[data_start..].to_vec());
+        } else if !cfg.files.is_empty() {
+            // FILE MODE: read and validate headers from each listed file.
+            let mut first_header: Option<Vec<String>> = None;
+            let file_list_snapshot = cfg.files.clone();
+            for path in &file_list_snapshot {
+                // Open file similar to per_file_thread logic but only for header line.
+                let ext = match path.to_str().and_then(|s| s.rfind('.')) { None => "".to_string(), Some(i) => String::from(&path.to_str().unwrap()[i..]) };
+                let file_res = std::fs::File::open(path);
+                if file_res.is_err() { return Err(format!("Unable to open file '{}' for header pre-scan: {}", path.display(), file_res.err().unwrap()).into()); }
+                let f = file_res.unwrap();
+                // Wrap in buffered reader for efficient line read.
+                // For compressed types we must create appropriate decoder.
+                // Reuse minimal decompression needed just to read first line.
+                let mut boxed: Box<dyn std::io::Read> = match &ext[..] {
+                    ".gz" | ".tgz" => Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(f))),
+                    ".zst" | ".zstd" => match zstd::stream::read::Decoder::new(std::io::BufReader::new(f)) { Ok(d) => Box::new(d), Err(e) => return Err(format!("zstd header read error for '{}': {}", path.display(), e).into()) },
+                    _ => Box::new(std::io::BufReader::new(f)),
+                };
+                // Read first line bytes.
+                let mut header_bytes: Vec<u8> = Vec::with_capacity(256);
+                let mut buf = [0u8; 1];
+                loop {
+                    match boxed.read(&mut buf) {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {
+                            if buf[0] == b'\n' { break; }
+                            if buf[0] == b'\r' { // handle CRLF
+                                // Peek next char if LF and consume it.
+                                let mut peek = [0u8;1];
+                                if let Ok(n) = boxed.read(&mut peek) { if n == 1 && peek[0] != b'\n' { header_bytes.push(peek[0]); } }
+                                break;
+                            }
+                            header_bytes.push(buf[0]);
+                        }
+                        Err(e) => return Err(format!("Error reading header from '{}': {}", path.display(), e).into()),
+                    }
+                }
+                if header_bytes.is_empty() { return Err(format!("Empty header in file '{}'", path.display()).into()); }
+                // Parse header using CSV builder with has_headers(false)
+                let mut builder = create_csv_builder(&cfg);
+                builder.has_headers(false);
+                let mut header_reader = builder.from_reader(header_bytes.as_slice());
+                let rec_opt = header_reader.records().next();
+                let rec = match rec_opt { Some(Ok(r)) => r, Some(Err(e)) => return Err(format!("Unable to parse header in '{}': {}", path.display(), e).into()), None => return Err(format!("No header record parsed in '{}'", path.display()).into()) };
+                let current_header: Vec<String> = rec.iter().map(|s| s.to_string()).collect();
+                if first_header.is_none() {
+                    // Resolve names on first header.
+                    if let Some(c) = Arc::get_mut(&mut cfg) {
+                        c.resolve_key_field_names(&rec)?;
+                    } else {
+                        return Err("Internal error: cfg already shared before header resolution".into());
+                    }
+                    first_header = Some(current_header);
+                } else if let Some(ref fh) = first_header {
+                    if *fh != current_header {
+                        return Err(format!("Header mismatch: file '{}' has different header. First header: [{}] vs current: [{}]",
+                            path.display(), fh.join(","), current_header.join(",")).into());
+                    }
+                }
+            }
+        }
+    }
+
+    // After header resolution spawn worker threads (ensures indices available to all workers).
     for no_threads in 0..cfg.parse_threads {
         let cfg = cfg.clone();
         let clone_recv_fileslice = recv_fileslice.clone();
@@ -250,6 +351,11 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
         worker_handlers.push(h);
     }
 
+    // NOTE: Previously we spawned parse workers twice which caused half of them to wait
+    // forever for a termination sentinel leading to a hang (especially visible in stdin
+    // shortcut path). The duplicate loop has been removed; workers are spawned only once
+    // above after header/name resolution.
+
     // SETUP IO
 
     // IO slicer threads
@@ -261,27 +367,31 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
             crossbeam_channel::unbounded()
         };
 
-    for no_threads in 0..cfg.io_threads {
-        let clone_cfg = cfg.clone();
-        let clone_recv_pathbuff = recv_pathbuff.clone();
-        let clone_send_fileslice = send_fileslice.clone();
-        let clone_recv_blocks = recv_blocks.clone();
-        let io_status_cloned = io_status.clone();
-    let path_re: Option<Regex_pre2> = clone_cfg.re_path.as_ref().map(|x| Regex_pre2::new(x).unwrap());
-        let per_ctx = PerFileCtx {
-            recv_blocks: clone_recv_blocks,
-            recv_pathbuff: clone_recv_pathbuff,
-            send_fileslice: clone_send_fileslice,
-            io_block_size: clone_cfg.io_block_size,
-            block_size: clone_cfg.q_block_size,
-            verbosity: clone_cfg.verbose.into(),
-            recycle_disable: clone_cfg.recycle_io_blocks_disable,
-        };
-        let h = thread::Builder::new()
-            .name(format!("worker_io{}", no_threads))
-            .spawn(move || per_file_thread(per_ctx, io_status_cloned, &path_re))
-            .unwrap();
-        io_handler.push(h);
+    if !do_stdin {
+        for no_threads in 0..cfg.io_threads {
+            let clone_cfg = cfg.clone();
+            let clone_recv_pathbuff = recv_pathbuff.clone();
+            let clone_send_fileslice = send_fileslice.clone();
+            let clone_recv_blocks = recv_blocks.clone();
+            let io_status_cloned = io_status.clone();
+            let path_re: Option<Regex_pre2> = clone_cfg.re_path.as_ref().map(|x| Regex_pre2::new(x).unwrap());
+            let per_ctx = PerFileCtx {
+                recv_blocks: clone_recv_blocks,
+                recv_pathbuff: clone_recv_pathbuff,
+                send_fileslice: clone_send_fileslice,
+                io_block_size: clone_cfg.io_block_size,
+                block_size: clone_cfg.q_block_size,
+                verbosity: clone_cfg.verbose.into(),
+                recycle_disable: clone_cfg.recycle_io_blocks_disable,
+            };
+            let h = thread::Builder::new()
+                .name(format!("worker_io{}", no_threads))
+                .spawn(move || per_file_thread(per_ctx, io_status_cloned, &path_re))
+                .unwrap();
+            io_handler.push(h);
+        }
+    } else if cfg.verbose > 1 {
+        eprintln!("Skipping IO thread spawn in stdin mode (io_threads:{} ignored)", cfg.io_threads);
     }
 
     //
@@ -334,11 +444,8 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| eprintln!("Unable to send path: {} to path queue", pathbuf.display()));
         }
     } else if do_stdin {
-    eprintln!("{}<<< reading from stdin{}",SetForegroundColor(Color::Blue), ResetColor);
-        let stdin = std::io::stdin();
-        let mut handle = stdin; // .lock();
+        eprintln!("{}<<< reading from stdin{}",SetForegroundColor(Color::Blue), ResetColor);
         let empty_vec: Vec<String> = Vec::new();
-
         let io_ctx = IoThreadCtx {
             recv_blocks: recv_blocks.clone(),
             send_fileslice: send_fileslice.clone(),
@@ -347,9 +454,24 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
             block_size: cfg.q_block_size,
             recycle_disable: cfg.recycle_io_blocks_disable,
         };
-        let (blocks, bytes) = io_thread_slicer(&io_ctx, &"STDIO".to_string(), &empty_vec, &mut handle)?;
-        total_bytes += bytes;
-        total_blocks += blocks;
+        if let Some(buf) = stdin_post_header {
+            // Use remaining stdin bytes after header
+            let mut cursor = std::io::Cursor::new(buf);
+            let (blocks, bytes) = io_thread_slicer(&io_ctx, &"STDIO".to_string(), &empty_vec, &mut cursor)?;
+            total_bytes += bytes;
+            total_blocks += blocks;
+        } else {
+            // Standard streaming mode (numeric keys or no name-based pre-scan)
+            let mut handle = std::io::stdin();
+            let (blocks, bytes) = io_thread_slicer(&io_ctx, &"STDIO".to_string(), &empty_vec, &mut handle)?;
+            total_bytes += bytes;
+            total_blocks += blocks;
+        }
+        // Terminate parse workers immediately (stdin mode has no IO threads to wait for)
+        for _i in 0..cfg.parse_threads { send_fileslice.send(None)?; }
+        // Skip to merge phase directly
+        phase.store(ProcPhase::MERGE as isize, Relaxed);
+        // Fall through to unified merge/output logic below (shared with file mode)
     } else if !cfg.files.is_empty() {
         let filelist = &cfg.files;
         for path in filelist {
@@ -520,14 +642,19 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
 
     phase.store(ProcPhase::OUTPUT as isize, Relaxed);
     let alias = |field: usize, del: char| -> String {
+        // field is 0-based internally; display as 1-based
+        if let Some(name) = cfg.key_index_names.read().unwrap().get(&field) {
+            return format!("{}{}{}", field + 1, del, name);
+        }
         if let Some(list) = &cfg.field_aliases {
             for (index, s) in list.iter() {
-                if *index == field {
-                    return format!("{}{}{}", field, del, s);
+                if *index == field { // aliases expected stored as 0-based too
+                    return format!("{}{}{}", field + 1, del, s);
                 }
             }
         }
-        field.to_string()
+        // default numeric (1-based)
+        (field + 1).to_string()
     };
 
     let alias_c = |field: usize| -> String { alias(field, ':') };
@@ -542,36 +669,39 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
             celltable.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
             {
                 let mut vcell = vec![];
-                if !cfg.key_fields.is_empty() {
-                    for x in &cfg.key_fields {
-                        vcell.push(Cell::new(&format!("k:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                {
+                    let key_fields_guard = cfg.key_fields();
+                    if !key_fields_guard.is_empty() {
+                        for x in key_fields_guard.iter() {
+                            vcell.push(Cell::new(&format!("k:{}", alias_m(*x))));
+                        }
+                    } else {
+                        vcell.push(Cell::new("k:-"));
                     }
-                } else {
-                    vcell.push(Cell::new("k:-"));
                 }
                 if !cfg.no_record_count {
                     vcell.push(Cell::new("count"));
                 }
                 for x in &cfg.sum_fields {
-                    vcell.push(Cell::new(&format!("sum:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("sum:{}", alias_m(*x))));
                 }
                 for x in &cfg.min_num_fields {
-                    vcell.push(Cell::new(&format!("min:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("min:{}", alias_m(*x))));
                 }
                 for x in &cfg.max_num_fields {
-                    vcell.push(Cell::new(&format!("max:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("max:{}", alias_m(*x))));
                 }
                 for x in &cfg.avg_fields {
-                    vcell.push(Cell::new(&format!("avg:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("avg:{}", alias_m(*x))));
                 }
                 for x in &cfg.min_str_fields {
-                    vcell.push(Cell::new(&format!("minstr:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("minstr:{}", alias_m(*x))));
                 }
                 for x in &cfg.max_str_fields {
-                    vcell.push(Cell::new(&format!("maxstr:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("maxstr:{}", alias_m(*x))));
                 }
                 for x in &cfg.unique_fields {
-                    vcell.push(Cell::new(&format!("cnt_uniq:{}", alias_m(re_mod_idx(&cfg, *x)))));
+                    vcell.push(Cell::new(&format!("cnt_uniq:{}", alias_m(*x))));
                 }
                 let row = Row::new(vcell);
                 celltable.set_titles(row);
@@ -660,38 +790,27 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut line_out = String::with_capacity(180);
             {
-                if !cfg.key_fields.is_empty() {
-                    for x in &cfg.key_fields {
-                        line_out.push_str(&format!("k:{}{}", alias_c(re_mod_idx(&cfg, *x)), &cfg.od));
+                {
+                    let key_fields_guard = cfg.key_fields();
+                    if !key_fields_guard.is_empty() {
+                        for x in key_fields_guard.iter() {
+                            line_out.push_str(&format!("k:{}{}", alias_c(*x), &cfg.od));
+                        }
+                        line_out.truncate(line_out.len() - 1);
+                    } else {
+                        line_out.push_str(&format!("{}k:-", &cfg.od));
                     }
-                    line_out.truncate(line_out.len() - 1);
-                } else {
-                    line_out.push_str(&format!("{}k:-", &cfg.od));
                 }
                 if !cfg.no_record_count {
                     line_out.push_str(&format!("{}count", &cfg.od));
                 }
-                for x in &cfg.sum_fields {
-                    line_out.push_str(&format!("{}sum:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.min_num_fields {
-                    line_out.push_str(&format!("{}min:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.max_num_fields {
-                    line_out.push_str(&format!("{}max:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.avg_fields {
-                    line_out.push_str(&format!("{}avg:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.min_str_fields {
-                    line_out.push_str(&format!("{}minstr:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.max_str_fields {
-                    line_out.push_str(&format!("{}maxstr:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
-                for x in &cfg.unique_fields {
-                    line_out.push_str(&format!("{}cnt_uniq:{}", &cfg.od, alias_c(re_mod_idx(&cfg, *x))));
-                }
+                for x in &cfg.sum_fields { line_out.push_str(&format!("{}sum:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.min_num_fields { line_out.push_str(&format!("{}min:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.max_num_fields { line_out.push_str(&format!("{}max:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.avg_fields { line_out.push_str(&format!("{}avg:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.min_str_fields { line_out.push_str(&format!("{}minstr:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.max_str_fields { line_out.push_str(&format!("{}maxstr:{}", &cfg.od, alias_c(*x))); }
+                for x in &cfg.unique_fields { line_out.push_str(&format!("{}cnt_uniq:{}", &cfg.od, alias_c(*x))); }
                 line_out.push('\n');
                 writer.write_all(line_out.as_bytes())?;
             }
@@ -987,12 +1106,21 @@ fn _worker_csv(
     };
 
     'BLOCK_LOOP: loop {
-        let fc = match recv.recv().unwrap() {
-            Some(fc) => fc,
-            None => {
-                if cfg.verbose > 1 {
-                    eprintln!("{} exit on None", thread::current().name().unwrap())
+        let fc = match recv.recv() {
+            Ok(Some(fc)) => {
+                if cfg.verbose > 3 {
+                    eprintln!("DBG worker_csv {} got slice index:{} len:{} file:{}", thread::current().name().unwrap_or("?"), fc.index, fc.len, fc.filename);
                 }
+                fc
+            }
+            Ok(None) => {
+                if cfg.verbose > 0 {
+                    eprintln!("DBG worker_csv {} received termination sentinel", thread::current().name().unwrap_or("?"));
+                }
+                break;
+            }
+            Err(e) => {
+                eprintln!("ERR worker_csv recv failed: {}", e);
                 break;
             }
         };
@@ -1009,9 +1137,11 @@ fn _worker_csv(
 
             let mut recrdr = csv_builder.from_reader(lbuff);
             if add_subs {
+                let mut row_counter: usize = 0;
                 for record in recrdr.records() {
                     match record {
                         Ok(record) => {
+                            row_counter += 1;
                             let mut v = SmallVec::<[&str; 16]>::new();
                             fc.sub_grps.iter().map(|x| x.as_str()).chain(record.iter())
                                 .for_each(|x| v.push(x)); //
@@ -1046,10 +1176,12 @@ fn _worker_csv(
                     }
                 }
             } else {
+                let mut row_counter: usize = 0;
                 // cnt_rec tracked previously; removed as unused
                 for record in recrdr.records() {
                     match record {
                         Ok(record) => {
+                            row_counter += 1;
                             match sch {
                                 Some(ref mut sch) => {
                                     sch.schema_rec(&record, record.len());
@@ -1081,9 +1213,11 @@ fn _worker_csv(
             }
         }
         if !cfg.recycle_io_blocks_disable {
+            if cfg.verbose > 3 { eprintln!("DBG worker_csv recycling block len:{}", fc.block.len()); }
             send_blocks.send(fc.block)?;
         }
     }
+    if cfg.verbose > 0 { eprintln!("DBG worker_csv {} exiting loop", thread::current().name().unwrap_or("?")); }
     if let Some(mut sch) = sch { sch.print_schema(cfg); }
 
     Ok((map, rowcount, fieldcount, fieldskipped, lines_skipped))
@@ -1288,7 +1422,12 @@ fn ascii_line_fixup_full(slice: &[u8], str: &mut String) {
 
 fn create_csv_builder(cfg: &CliCfg) -> csv::ReaderBuilder {
     let mut builder = csv::ReaderBuilder::new();
-    builder.delimiter(cfg.delimiter as u8).has_headers(cfg.skip_header).flexible(true);
+    // If we used name-based key selectors, the header was consumed externally during pre-scan
+    // (stdin) or stripped prior to slicing (files). In that case treating every first row of a
+    // block as a header would incorrectly skip data lines. So only enable internal header handling
+    // when skip_header is set AND no name-based key selectors were provided.
+    let internal_headers = cfg.skip_header && cfg.key_field_names.is_empty();
+    builder.delimiter(cfg.delimiter as u8).has_headers(internal_headers).flexible(true);
 
     if cfg.quote.is_some() {
         builder.quote(cfg.quote.unwrap() as u8);
