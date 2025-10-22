@@ -64,19 +64,19 @@ cargo build --release --no-default-features --features "core-io memory-tracking"
 Group by on a gzipped file (decompression auto‑handled):
 
 ```bash
-cargo run --release -- -f data/log.gz -k 2,5 -s 9 --csv_output
+cargo run --release -- -f data/log.gz -k field2,field5 -s field9 --skip_header --csv_output
 ```
 
 Same command without ticker noise:
 
 ```bash
-cargo run --release --no-default-features --features core-io -- -f data/log.gz -k 2,5 -s 9 --csv_output
+cargo run --release --no-default-features --features core-io -- -f data/log.gz -k field2,field5 -s field9 --skip_header --csv_output
 ```
 
 Enable memory instrumentation for a focused run:
 
 ```bash
-cargo run --release --features "memory-tracking" -- -f data/log.gz -k 2,5 -s 9 --csv_output
+cargo run --release --features "memory-tracking" -- -f data/log.gz -k field2,field5 -s field9 --skip_header --csv_output
 ```
 
 > Note: Feature selection is compile‑time; recompile when switching.
@@ -91,7 +91,7 @@ cargo build --release --features "core-io stats fast-hash" --no-default-features
 ```
 Run with fast-hash:
 ```bash
-cargo run --release --features "fast-hash" -- -f data/log.gz -k 2,5 -s 9 --csv_output
+cargo run --release --features "fast-hash" -- -f data/log.gz -k field2,field5 -s field9 --skip_header --csv_output
 ```
 
 It does this job very fast by "slicing" blocks of data on line boundary points and forwarding those line-even blocks to multiple parser threads.
@@ -103,7 +103,7 @@ There are also multiple IO threads when list of files are provided as a data sou
 - Process files or stdin as a data source:
   - csv files
   - text/log handled via regex mode where sub groups map to field positions
-  - files are decompressed (like .zst, .gz, .xz, etc) on the fly
+  - files are decompressed (like `.zst`, `.gz`, `.xz`, etc) on the fly
   - recursive [--walk](https://github.com/BurntSushi/ripgrep/tree/master/ignore) directory trees and filter for only the files you want
 - Filenames (-p) can be filtered/parsed with regular expressions where sub-groups become fields.
 - Delimited output or "aligned" table output
