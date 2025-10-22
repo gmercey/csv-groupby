@@ -102,8 +102,8 @@ impl SchemaSample {
         }
 
         for i in 0 ..rec_len {
-            let mut v = self.matrix.get_mut(i);
-            if ( v.is_none()) {
+            let v = self.matrix.get_mut(i);
+            if v.is_none() {
                 // just in case the "header" or other previous line is not as long as this one...
                 self.matrix.push(vec![]);
                 self.matrix.get_mut(i).unwrap().push(i.to_string());
@@ -116,7 +116,7 @@ impl SchemaSample {
     }
 
     pub fn print_schema(self: &mut Self, cfg: &CliCfg) {
-        if self.matrix.len() <= 0 {
+    if self.matrix.is_empty() {
             return;
         } else {
             let mut padding = vec![];
@@ -157,7 +157,7 @@ impl SchemaSample {
     }
 
     pub fn done(self: &Self) -> bool {
-        if  self.matrix.len() <= 0 {
+    if self.matrix.is_empty() {
             return false;
         } else {
             return self.matrix.get(0).unwrap().len() > self.num as usize
@@ -166,7 +166,7 @@ impl SchemaSample {
 
 }
 
-pub fn schema_rec<T>(matrix: &mut Vec<Vec<String>>, ss: &mut String, line: &str, record: &T, rec_len: usize, map: &mut MyMap, cfg: &CliCfg, rowcount: &mut usize) -> (usize,usize)
+    pub fn schema_rec<T>(matrix: &mut Vec<Vec<String>>, _ss: &mut String, _line: &str, record: &T, rec_len: usize, _map: &mut MyMap, _cfg: &CliCfg, _rowcount: &mut usize) -> (usize,usize)
     where
         <T as std::ops::Index<usize>>::Output: AsRef<str>,
         T: std::ops::Index<usize> + std::fmt::Debug,
@@ -198,7 +198,7 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
 
     let mut fieldcount = 0usize;
     let mut skip_parse_fields = 0usize;
-    let mut lines_filtered = 0usize;
+    let lines_filtered = 0usize;
     use pcre2::bytes::{CaptureLocations as CaptureLocations_pcre2, Captures as Captures_pcre2, Regex as Regex_pre2};
 
     if cfg.verbose >= 3 {
@@ -250,7 +250,7 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
     }
     *rowcount += 1;
 
-    let mut brec: &mut KeySum = {
+    let brec: &mut KeySum = {
         if let Some(v1) = map.get_mut(ss) {
             v1
         } else {

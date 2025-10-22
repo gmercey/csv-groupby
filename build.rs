@@ -1,5 +1,3 @@
-use std::thread::LocalKey;
-
 fn main() {
     if let Some(rev) = git_revision_hash() {
         println!("cargo:rustc-env=BUILD_GIT_HASH={}", rev);
