@@ -1,7 +1,7 @@
 # csv-groupby
 ## `gb`   A Command that does a SQL like "group by" on delimited files OR arbitrary lines of text
 
-[![CI](https://github.com/gmercey/csv-groupby/actions/workflows/ci.yml/badge.svg)](https://github.com/gmercey/csv-groupby/actions/workflows/ci.yml)
+[![CI](https://github.com/gmercey/csv-groupby/actions/workflows/rust.yml/badge.svg)](https://github.com/gmercey/csv-groupby/actions/workflows/rust.yml)
 
 gb (current: `0.20.0`) is a command that takes delimited data (like csv files) or lines of text (like a log file) and
 emulates a SQL style select .. group by over that data.  It is partially inspired by
