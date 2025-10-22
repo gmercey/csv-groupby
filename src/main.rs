@@ -76,6 +76,9 @@ fn create_map() -> MyMap
     MyMap::default()//(1000, SeaHasher::default())
 }
 
+#[cfg(feature = "fast-hash")]
+type MyMap = hashbrown::HashMap<String, keysum::KeySum, ahash::RandomState>;
+#[cfg(not(feature = "fast-hash"))]
 type MyMap = BTreeMap<String, keysum::KeySum>;
 type WorkerStats = (MyMap, usize, usize, usize, usize);
 
@@ -143,12 +146,17 @@ fn stat_ticker(verbosity: usize, thread_stopper: Arc<AtomicBool>, io_status: &mu
             let cur = merge_status.current.load(Relaxed);
             let tot = merge_status.total.load(Relaxed);
             if tot > 0 {
-                let per = (cur as f64 / tot as f64)*100.0;
-                
-                eprint!("{}{}Merging map entries {} of {}  {:.2}% complete  mem: {}{}{}", 
+                // cur counts key visits across reduction levels; keys from an earlier left map can become a right map later and be recounted.
+                // Clamp percentage at 100% to avoid confusing >100% output and append a '+' marker when cur exceeded initial total.
+                let over = cur > tot;
+                let adj = if over { tot } else { cur };
+                let per = (adj as f64 / tot as f64)*100.0;
+                eprint!("{}{}Merging map entries {}{} of {}  {:.2}% complete  mem: {}{}{}", 
                     Clear(CurrentLine),
                     SetForegroundColor(Color::Green),
-                    cur, tot, per, mem_metric_digit(GLOBAL_TRACKER.get_alloc(), 4),
+                    cur,
+                    if over { "+" } else { "" },
+                    tot, per, mem_metric_digit(GLOBAL_TRACKER.get_alloc(), 4),
                     return_or_not, ResetColor);
             } else {
                 eprint!("{}{}Merging map ....{}{}", 
@@ -770,7 +778,7 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
 
                 for i in 0usize..cc.distinct.len() {
                     if cfg.write_distros.contains(&cfg.unique_fields[i]) {
-                        vcell.push(Cell::new(&distro_format(&cc.distinct[i], cfg.write_distros_upper, cfg.write_distros_bottom).to_string()));
+                        vcell.push(Cell::new(&crate::gen::distro_format_iter(cc.distinct[i].iter(), cfg.write_distros_upper, cfg.write_distros_bottom)));
                     } else {
                         vcell.push(Cell::new(&cc.distinct[i].len().to_string()));
                     }
@@ -788,7 +796,8 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
             let _writerlock = stdout.lock();
             let (_reader, mut writer) = get_reader_writer();
 
-            let mut line_out = String::with_capacity(180);
+            use std::io::Write;
+            let mut line_out = String::with_capacity(180); // retained for header only
             {
                 {
                     let key_fields_guard = cfg.key_fields();
@@ -814,6 +823,23 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
                 line_out.push('\n');
                 writer.write_all(line_out.as_bytes())?;
             }
+            // Reusable small buffers for numeric/string formatting
+            let mut num_buf = itoa::Buffer::new();
+            let mut float_buf = ryu::Buffer::new();
+            // Helper closure: write f64 without trailing .0 when integral (uses write! for integral case)
+            let mut write_f64 = |writer: &mut dyn std::io::Write, v: f64| -> std::io::Result<()> {
+                if v.is_finite() && v.fract() == 0.0 {
+                    // Represent as i64 (fits for typical aggregates) or fall back to ryu
+                    let iv = v.trunc();
+                    if iv >= (i64::MIN as f64) && iv <= (i64::MAX as f64) {
+                        write!(writer, "{}", iv as i64)
+                    } else {
+                        writer.write_all(float_buf.format(v).as_bytes())
+                    }
+                } else {
+                    writer.write_all(float_buf.format(v).as_bytes())
+                }
+            };
             'KEYS_CSV_LOOP: for ff in thekeys.iter() {
                 let cc = main_map.get(*ff).unwrap();
                 if let Some(count_ge) = cfg.count_ge {
@@ -832,47 +858,79 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 if !print_this_line { continue 'KEYS_CSV_LOOP; }
 
-                line_out.clear();
-                let keyv: Vec<&str> = ff.split(KEY_DEL).collect();
-                for i in 0..keyv.len() {
-                    if keyv[i].is_empty() {
-                        line_out.push_str(&cfg.empty);
-                    } else {
-                        line_out.push_str(keyv[i]);
-                    }
-                    if i < keyv.len() - 1 { line_out.push_str(&cfg.od); }
+                // Stream keys directly
+                let mut first = true;
+                for part in ff.split(KEY_DEL) {
+                    if !first { writer.write_all(cfg.od.as_bytes())?; }
+                    if part.is_empty() { writer.write_all(cfg.empty.as_bytes())?; } else { writer.write_all(part.as_bytes())?; }
+                    first = false;
                 }
                 if !cfg.no_record_count {
-                    line_out.push_str(&format!("{}{}", &cfg.od, cc.count));
+                    writer.write_all(cfg.od.as_bytes())?;
+                    writer.write_all(num_buf.format(cc.count).as_bytes())?;
                 }
+                // numeric aggregates
                 for x in &cc.nums {
+                    writer.write_all(cfg.od.as_bytes())?;
                     match x {
-                        Some(x) => line_out.push_str(&format!("{}{}", &cfg.od, x)),
-                        None => line_out.push_str(&format!("{}{}", &cfg.od, &cfg.null)),
-                    };
-                }
-                for x in &cc.avgs {
-                    line_out.push_str(&format!("{}{}", &cfg.od, x.0 / (x.1 as f64)));
-                }
-                for x in &cc.strs {
-                    line_out.push_str(&cfg.od);
-                    match x {
-                        Some(x) => line_out.push_str(&x.to_string()),
-                        None => line_out.push_str(&cfg.null),
-                    };
-                }
-                for i in 0usize..cc.distinct.len() {
-                    if cfg.write_distros.contains(&cfg.unique_fields[i]) {
-                        line_out.push_str(&cfg.od);
-                        line_out.push_str(&distro_format(&cc.distinct[i], cfg.write_distros_upper, cfg.write_distros_bottom));
-                    } else {
-                        line_out.push_str(&format!("{}{}", &cfg.od, cc.distinct[i].len()));
+                        Some(v) => write_f64(&mut writer, *v)?,
+                        None => writer.write_all(cfg.null.as_bytes())?,
                     }
                 }
-                line_out.push('\n');
-                writer.write_all(line_out.as_bytes())?;
+                // averages
+                for x in &cc.avgs {
+                    writer.write_all(cfg.od.as_bytes())?;
+                    if x.1 == 0 {
+                        writer.write_all(b"unknown")?;
+                    } else {
+                        write_f64(&mut writer, x.0 / (x.1 as f64))?;
+                    }
+                }
+                // string aggregates
+                for x in &cc.strs {
+                    writer.write_all(cfg.od.as_bytes())?;
+                    match x {
+                        Some(s) => writer.write_all(s.as_bytes())?,
+                        None => writer.write_all(cfg.null.as_bytes())?,
+                    }
+                }
+                // distinct counts / distributions
+                for i in 0usize..cc.distinct.len() {
+                    writer.write_all(cfg.od.as_bytes())?;
+                    if cfg.write_distros.contains(&cfg.unique_fields[i]) {
+                        let dist = crate::gen::distro_format_iter(cc.distinct[i].iter(), cfg.write_distros_upper, cfg.write_distros_bottom);
+                        writer.write_all(dist.as_bytes())?;
+                    } else {
+                        writer.write_all(num_buf.format(cc.distinct[i].len()).as_bytes())?;
+                    }
+                }
+                writer.write_all(b"\n")?;
             }
         }
+    }
+
+    // Memory instrumentation: summarize distinct store usage when requested
+    if cfg.mem_stats {
+        let mut small_total = 0usize;
+        let mut map_total = 0usize;
+        let mut distinct_entries = 0usize;
+        for (_k, ks) in &main_map {
+            for ds in &ks.distinct {
+                match ds {
+                    keysum::DistinctStore::Small(v) => { small_total += 1; distinct_entries += v.len(); },
+                    keysum::DistinctStore::Map(m) => { map_total += 1; distinct_entries += m.len(); },
+                }
+            }
+        }
+        let keys = main_map.len();
+        eprintln!("mem-stats: keys={} distinct_slots={} small_slots={} map_slots={} distinct_entries={} avg_entries_per_slot={:.2}",
+            keys,
+            small_total + map_total,
+            small_total,
+            map_total,
+            distinct_entries,
+            if (small_total + map_total) > 0 { distinct_entries as f64 / (small_total + map_total) as f64 } else { 0.0 }
+        );
     }
     let endout = Instant::now();
     let outdur = endout - startout;
@@ -1137,11 +1195,11 @@ fn _worker_csv(
 
             let mut recrdr = csv_builder.from_reader(lbuff);
             if add_subs {
-                let mut row_counter: usize = 0;
+                let mut _row_counter: usize = 0; // unused counter retained for potential diagnostics
                 for record in recrdr.records() {
                     match record {
                         Ok(record) => {
-                            row_counter += 1;
+                            _row_counter += 1;
                             let mut v = SmallVec::<[&str; 16]>::new();
                             fc.sub_grps.iter().map(|x| x.as_str()).chain(record.iter())
                                 .for_each(|x| v.push(x)); //
@@ -1176,12 +1234,12 @@ fn _worker_csv(
                     }
                 }
             } else {
-                let mut row_counter: usize = 0;
+                let mut _row_counter: usize = 0; // unused counter retained for potential diagnostics
                 // cnt_rec tracked previously; removed as unused
                 for record in recrdr.records() {
                     match record {
                         Ok(record) => {
-                            row_counter += 1;
+                            _row_counter += 1;
                             match sch {
                                 Some(ref mut sch) => {
                                     sch.schema_rec(&record, record.len());

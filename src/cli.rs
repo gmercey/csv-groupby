@@ -86,6 +86,10 @@ pub struct CliCfg {
     #[clap(skip)] pub min_str_fields: Vec<usize>,
     #[clap(skip)] pub min_str_field_names: Vec<String>,
     #[arg(short='A', long="field_aliases", value_delimiter=',', value_parser=parse_alias)] pub field_aliases: Option<Vec<(usize,String)>>,
+    // Aggregation specs (constructed post name resolution) for unified numeric ops
+    #[clap(skip)] pub num_specs: Vec<NumAggSpec>,
+    #[clap(skip)] pub str_specs: Vec<StrAggSpec>,
+    #[clap(skip)] pub avg_specs: Vec<AvgAggSpec>,
     #[arg(short='r', long="regex")] pub re_str: Vec<String>,
     #[arg(short='p', long="path_re")] pub re_path: Option<String>,
     #[arg(long="re_line_contains")] pub re_line_contains: Option<String>,
@@ -116,6 +120,7 @@ pub struct CliCfg {
     #[arg(long="recycle_io_blocks_disable")] pub recycle_io_blocks_disable: bool,
     #[arg(long="disable_key_sort")] pub disable_key_sort: bool,
     #[arg(long="null_write", default_value="NULL")] pub null: String,
+    #[arg(long="mem_stats")] pub mem_stats: bool,
     #[allow(non_snake_case)]
     #[arg(long="ISO-8859")] pub iso_8859: bool,
     #[arg(long="sample_schema")] pub sample_schema: Option<u32>,
@@ -128,6 +133,39 @@ pub struct CliCfg {
     #[arg(long="count_ge")] pub count_le: Option<u64>,
     #[arg(long="count_le")] pub count_ge: Option<u64>,
     #[arg(short='E', long="print_examples")] pub print_examples: bool,
+}
+
+// ---- Unified aggregation spec models (Step 1: definitions, wiring; logic applied later) ----
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumOpKind { Sum, Min, Max }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumAggSpec {
+    // Source column index (0-based)
+    pub src_index: usize,
+    // Destination slot index inside KeySum.nums (0-based)
+    pub dest_index: usize,
+    pub kind: NumOpKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrOpKind { Min, Max }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrAggSpec {
+    pub src_index: usize,
+    pub dest_index: usize,
+    pub kind: StrOpKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvgOpKind { Avg }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AvgAggSpec {
+    pub src_index: usize,
+    pub dest_index: usize,
+    pub kind: AvgOpKind,
 }
 
 fn print_examples() {
@@ -270,6 +308,9 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
     // but then put into to th Arc as immutable
     let cfg = Arc::new({
     let mut cfg: CliCfg = CliCfg::parse();
+        // Initialize spec vectors empty (populated after potential name resolution)
+        cfg.num_specs = Vec::new();
+        cfg.str_specs = Vec::new();
         if cfg.print_examples {
             print_examples();
             std::process::exit(1);
@@ -415,6 +456,8 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
         if cfg.sample_schema.is_some() {
             cfg.parse_threads = 1;
         }
+        // Build initial specs so regex mode (no header resolution) has aggregation definitions.
+        cfg.build_specs();
         cfg
     });
 
@@ -423,6 +466,59 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
 
 impl CliCfg {
     pub fn key_fields(&self) -> RwLockReadGuard<'_, Vec<usize>> { self.key_fields_idx.read().unwrap() }
+    // Central validation invoked after name resolution (not during initial numeric parse to avoid false negatives while names pending).
+    pub fn validate_config(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for wd in &self.write_distros { if !self.unique_fields.contains(wd) { Err(format!("write_distro specifies field {} that is not a subset of the unique_keys", wd))?; } }
+        // Determine if there is any configured work either numeric indices OR unresolved names waiting on header.
+        let no_numeric_work = self.key_fields().is_empty()
+            && self.sum_fields.is_empty() && self.avg_fields.is_empty() && self.unique_fields.is_empty()
+            && self.min_num_fields.is_empty() && self.max_num_fields.is_empty()
+            && self.min_str_fields.is_empty() && self.max_str_fields.is_empty();
+        let pending_name_work = !(self.key_field_names.is_empty()
+            && self.sum_field_names.is_empty() && self.avg_field_names.is_empty() && self.unique_field_names.is_empty()
+            && self.min_num_field_names.is_empty() && self.max_num_field_names.is_empty()
+            && self.min_str_field_names.is_empty() && self.max_str_field_names.is_empty());
+        if no_numeric_work && !pending_name_work { Err("No work to do!".to_string())?; }
+        for a in &self.avg_fields { if self.sum_fields.contains(a) || self.min_num_fields.contains(a) || self.max_num_fields.contains(a) { eprintln!("Warning: avg field {} also present in other numeric aggregate list", a+1); } }
+        Ok(())
+    }
+    // Build unified aggregation spec vectors from already 0-based field index lists.
+    // Ordering contract preserved with existing output formatting assumptions:
+    //   nums: sums -> mins -> maxs
+    //   strs: min_str -> max_str
+    pub fn build_specs(&mut self) {
+        // numeric specs
+        self.num_specs.clear();
+        let mut dest_index = 0usize;
+        for &src in &self.sum_fields {
+            self.num_specs.push(NumAggSpec { src_index: src, dest_index, kind: NumOpKind::Sum });
+            dest_index += 1;
+        }
+        for &src in &self.min_num_fields {
+            self.num_specs.push(NumAggSpec { src_index: src, dest_index, kind: NumOpKind::Min });
+            dest_index += 1;
+        }
+        for &src in &self.max_num_fields {
+            self.num_specs.push(NumAggSpec { src_index: src, dest_index, kind: NumOpKind::Max });
+            dest_index += 1;
+        }
+        // string specs
+        self.str_specs.clear();
+        let mut str_dest = 0usize;
+        for &src in &self.min_str_fields {
+            self.str_specs.push(StrAggSpec { src_index: src, dest_index: str_dest, kind: StrOpKind::Min });
+            str_dest += 1;
+        }
+        for &src in &self.max_str_fields {
+            self.str_specs.push(StrAggSpec { src_index: src, dest_index: str_dest, kind: StrOpKind::Max });
+            str_dest += 1;
+        }
+        // average specs (simple pass-through: one dest slot per avg field)
+        self.avg_specs.clear();
+        for (i, &src) in self.avg_fields.iter().enumerate() {
+            self.avg_specs.push(AvgAggSpec { src_index: src, dest_index: i, kind: AvgOpKind::Avg });
+        }
+    }
     pub fn resolve_key_field_names(&mut self, headers: &csv::StringRecord) -> std::result::Result<(), Box<dyn std::error::Error>> {
         if self.key_fields_resolved.load(AtomicOrdering::Relaxed) { return Ok(()); }
         let mut map = std::collections::HashMap::<&str, usize>::new();
@@ -470,6 +566,11 @@ impl CliCfg {
         resolve_numeric_name_list(headers, &max_str_names_snapshot, &mut self.max_str_fields, &self.key_index_names, "-X")?;
         // After resolving write distros ensure they are subset of unique fields
         for wd in &self.write_distros { if !self.unique_fields.contains(wd) { Err(format!("write_distro specifies field {} that is not a subset of the unique_keys", wd))?; } }
+
+        // Rebuild specs now that any name-based indices have been added.
+        self.build_specs();
+        // Final validation post resolution
+        self.validate_config()?;
         Ok(())
     }
 }

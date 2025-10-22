@@ -26,11 +26,13 @@ Current features:
 
 ### Build combinations
 Minimal (no diagnostics):
-```
-cargo build --release --no-default-features --features core-io
-```
-
-Core + stats (default set):
+ - Refactored aggregation engine to a spec‑driven model (unified enum specs for numeric sum/min/max, string min/max, and avg) eliminating duplicated loops.
+ - Introduced adaptive distinct counting `DistinctStore` (small inline vector that upgrades to a hash map above 16 unique values) reducing per‑key overhead for low‑cardinality fields.
+ - Added pairwise parallel merge with thresholds (maps>=4 or total entries>=10k) to avoid rayon overhead on small workloads while accelerating large reductions.
+ - Zero‑copy CSV output streaming (direct writer formatting via `itoa`/`ryu`) and suppressed trailing `.0` for integer float values to keep test output stable.
+ - Optional fast hashing (`--features fast-hash`) switching key maps & large distinct maps to `hashbrown + ahash` for higher throughput (default BTreeMap remains for deterministic ordering when feature is off).
+ - Predicate short‑circuit fusion combines `--where_re` and `--where_not_re` evaluation into one pass per record.
+ - Memory instrumentation flag `--mem-stats` summarizing distinct store usage (small vs map slots, total distinct entries, avg entries/slot).
 ```
 cargo build --release
 ```
@@ -43,9 +45,6 @@ cargo build --release --features "stats memory-tracking"
 Disable only stats (keep memory tracking for a targeted test):
 ```
 cargo build --release --no-default-features --features "core-io memory-tracking"
-```
-
-### Runtime differences
 * Without `stats`: No periodic ticker thread; summary prints raw byte counts without human digit grouping.
 * With `stats`: Periodic progress line (records/sec, MB/s, memory); humanized memory sizes.
 * With `memory-tracking`: Extra memory metrics collected; small overhead (generally <5%).

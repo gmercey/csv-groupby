@@ -91,6 +91,11 @@ assert_cmd = "2"                         # For tests (APIs mostly same)
 predicates = "3"                         # Matches assert_cmd updates
 backtrace = "0.3.74"                     # Recent bugfixes
 crossterm = "0.27"                       # Latest stable for terminal coloring
+rayon = "1.8"                            # Parallel iterators for merge reduction
+itoa = "1.0"                             # Fast integer to string formatting (zero-copy buffer)
+ryu = "1.0"                              # Fast f64 to string formatting (zero-copy)
+hashbrown = { version = "0.14", optional = true }
+ahash = { version = "0.8", optional = true }
 
 [features]
 default = ["core-io", "stats"]
@@ -100,6 +105,7 @@ core-io = []
 memory-tracking = []
 # Enable runtime statistics ticker & human readable metrics
 stats = []
+fast-hash = ["hashbrown", "ahash"]
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }

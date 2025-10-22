@@ -12,6 +12,50 @@ use pcre2::bytes::{Captures as Captures_pcre2, Regex as Regex_pre2};
 use std::fs::File;
 use flate2::read::GzDecoder;
 
+// Unified decompression/open helper.
+// Handles plain files and common compression extensions, returning a boxed Read.
+// Respects io_block_size for buffered readers where applicable.
+pub fn open_decompress(path: &Path, io_block_size: usize, verbosity: usize) -> Option<Box<dyn Read>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    // Reconstruct extension with leading dot for older logic compatibility.
+    let dot_ext = if ext.is_empty() { String::new() } else { format!(".{}", ext) };
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(err) => { eprintln!("skipping file \"{}\", open error: {}", path.display(), err); return None; }
+    };
+    // Helper to wrap with buffering if io_block_size > 0.
+    let bufwrap = |f: File| -> Box<dyn Read> {
+        if io_block_size != 0 { Box::new(BufReader::with_capacity(io_block_size, f)) } else { Box::new(BufReader::new(f)) }
+    };
+    match dot_ext.as_str() {
+        ".gz" | ".tgz" => {
+            if verbosity > 2 { eprintln!("opening gzip file {}", path.display()); }
+            let rdr = bufwrap(file);
+            Some(Box::new(GzDecoder::new(rdr)))
+        }
+        ".zst" | ".zstd" => {
+            if verbosity > 2 { eprintln!("opening zstd file {}", path.display()); }
+            let inner = bufwrap(file);
+            match zstd::stream::read::Decoder::new(inner) {
+                Ok(dec) => Some(Box::new(dec)),
+                Err(err) => { eprintln!("skipping file \"{}\", zstd decoder error: {}", path.display(), err); None }
+            }
+        }
+        // Delegate remaining formats to grep_cli's DecompressionReader; cannot customize buffer size here.
+        ".bz2" | ".tbz2" | ".txz" | ".xz" | ".lz4" | ".lzma" | ".br" | ".z" => {
+            if io_block_size != 0 && verbosity > 1 { eprintln!("file {} cannot override IO block size (external decoder)", path.display()); }
+            match DecompressionReader::new(path) {
+                Ok(rdr) => Some(Box::new(rdr)),
+                Err(err) => { eprintln!("skipping compressed file \"{}\", error: {}", path.display(), err); None }
+            }
+        }
+        _ => {
+            if verbosity > 3 { eprintln!("opening plain file {}", path.display()); }
+            Some(bufwrap(file))
+        }
+    }
+}
+
 // Cross-platform lightweight thread id helper. On Linux use gettid syscall; on other Unix fall back
 // to pthread_self (sufficient for diagnostic logging). On Windows use GetCurrentThreadId.
 #[cfg(target_os = "windows")]
@@ -363,74 +407,10 @@ pub fn per_file_thread(
             eprintln!("thread id: {} processing file: {}", gettid(), filename.display());
         }
 
-        let ext = {
-            match filename.to_str().unwrap().rfind('.') {
-                None => String::from(""),
-                Some(i) => String::from(&filename.to_str().unwrap()[i..]),
-            }
-        };
-        let mut rdr: Box<dyn Read> = match &ext[..] {
-            ".gz" | ".tgz" => {
-                match File::open(&filename) {
-                    Ok(f) => if block_size != 0 {
-                        Box::new( GzDecoder::new(BufReader::with_capacity(io_block_size,f)))
-                    } else {
-                        Box::new(GzDecoder::new(f))
-                    },
-                    Err(err) => {
-                        eprintln!("skipping gz file \"{}\", due to error: {}", filename.display(), err);
-                        continue;
-                    }
-                }
-            }
-            ".zst" | ".zstd" => {
-                match File::open(&filename) {
-                    Ok(f) => {
-                        match zstd::stream::read::Decoder::new({
-                            if io_block_size != 0 {
-                                BufReader::with_capacity(io_block_size, f)
-                            } else {
-                                BufReader::new(f)
-                            }
-                        }) {
-                            Ok(br) => Box::new(br),
-                            Err(err) => {
-                                eprintln!("skipping file \"{}\", zstd decoder error: {}", filename.display(), err);
-                                continue;
-                            },
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("skipping zst file \"{}\", due to error: {}", filename.display(), err);
-                        continue;
-                    }
-                }
-            }
-            ".bz2" | ".tbz2" | ".txz" | ".xz" | ".lz4" | ".lzma" | ".br" | ".Z" => {
-                if io_block_size != 0 && verbosity > 1 {
-                    eprintln!("file {} cannot override default IO block size as it is opened via a different method", filename.display());
-                }
-                match DecompressionReader::new(&filename) {
-                    Ok(rdr) => Box::new(rdr),
-                    Err(err) => {
-                        eprintln!("skipping general de-comp file \"{}\", due to error: {}", filename.display(), err);
-                        continue;
-                    }
-                }
-            }
-            _ => {
-                match File::open(&filename) {
-                    Ok(f) => if block_size != 0 {
-                        Box::new(BufReader::with_capacity(io_block_size, f))
-                    } else {
-                        Box::new(BufReader::new(f))
-                    },
-                    Err(err) => {
-                        eprintln!("skipping regular file \"{}\", due to error: {}", filename.display(), err);
-                        continue;
-                    }
-                }
-            },
+        // Unified open/decompress
+        let rdr = match open_decompress(&filename, io_block_size, verbosity) {
+            Some(r) => r,
+            None => continue,
         };
         // If header skipping is required (name-based keys resolved earlier), remove first line now.
         let mut boxed_reader: Box<dyn Read> = rdr;
@@ -503,4 +483,24 @@ pub fn get_reader_writer() -> (impl BufRead, impl Write) {
 
     let (reader, writer) = (BufReader::new(stdin), BufWriter::new(stdout));
     (reader, writer)
+}
+
+// Generic iterator-based distribution formatter to avoid temporary HashMap materialization.
+pub fn distro_format_iter<'a, I>(iter: I, upper: usize, bottom: usize) -> String
+    where I: Iterator<Item = (&'a String, &'a usize)>
+{
+    let mut vec: Vec<(usize, &String)> = iter.map(|(k,c)| (*c, k)).collect();
+    vec.sort_by(|x,y| {
+        let ev = y.0.cmp(&x.0);
+        if ev == core::cmp::Ordering::Equal { x.1.cmp(y.1) } else { ev }
+    });
+    let mut msg = String::with_capacity(16);
+    if upper + bottom >= vec.len() {
+        for e in &vec { msg.push_str(&format!("({} x {})", e.1, e.0)); }
+    } else {
+        for e in vec.iter().take(upper) { msg.push_str(&format!("({} x {})", e.1, e.0)); }
+        msg.push_str(&format!("..{}..", vec.len() - (bottom + upper)));
+        for e in vec.iter().skip(vec.len() - bottom) { msg.push_str(&format!("({} x {})", e.1, e.0)); }
+    }
+    msg
 }

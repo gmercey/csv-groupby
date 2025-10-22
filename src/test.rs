@@ -208,6 +208,56 @@ mod tests {
         )
     }
 
+    // New focused test: regex mode with only sum/avg/distinct (no min/max numeric or string)
+    // Ensures early spec construction (build_specs in get_cli) works when header resolution is not invoked.
+    #[test]
+    fn re_numeric_only_stdin() -> Result<(), Box<dyn std::error::Error>> {
+        // Use a reduced dataset (first 200 lines) for speed
+        let mut slice = String::new();
+        for i in 1..=200 {
+            let q = i % 10;            // key
+            let j = i * 10;            // sum field
+            let d = i as f64 * 2.0f64; // avg field
+            slice.push_str(&format!("{},{},{},{}", q, i, j, d));
+            if i < 200 { slice.push('\n'); }
+        }
+    // Expected sums are over field 4 (d = i*2). For key 0 values are 10..200 step 10; others q + 10k.
+    // Computed sums: key0 => 4200; key q>0 => 40*q + 3800.
+    let expected = "k:1,count,sum:4,avg:1,cnt_uniq:2\n0,20,4200,0,20\n1,20,3840,1,20\n2,20,3880,2,20\n3,20,3920,3,20\n4,20,3960,4,20\n5,20,4000,5,20\n6,20,4040,6,20\n7,20,4080,7,20\n8,20,4120,8,20\n9,20,4160,9,20\n";
+        stdin_test_driver(
+            "-r ^([^,]+),([^,]+),([^,]+),([^,]+)$ -k 1 -s 4 -u 2 -a 1 -c -t 2 --q_block_size 32",
+            &slice,
+            expected,
+        )
+    }
+
+    // Distinct upgrade boundary test: ensure output counts correct at threshold and threshold+1
+    #[test]
+    fn distinct_upgrade_boundary() -> Result<(), Box<dyn std::error::Error>> {
+        // Exactly DISTINCT_SMALL_THRESHOLD (16) distinct values
+        let mut slice16 = String::new();
+        for i in 0..16 { slice16.push_str(&format!("0,v{}\n", i)); }
+        let expected16 = "k:1,count,cnt_uniq:2\n0,16,16\n";
+        stdin_test_driver("-r ^([^,]+),([^,]+)$ -k 1 -u 2 -c", &slice16.trim_end(), expected16)?;
+
+        // Threshold + 1 (17) distinct values triggers map upgrade internally (not observable except count)
+        let mut slice17 = String::new();
+        for i in 0..17 { slice17.push_str(&format!("0,w{}\n", i)); }
+        let expected17 = "k:1,count,cnt_uniq:2\n0,17,17\n";
+        stdin_test_driver("-r ^([^,]+),([^,]+)$ -k 1 -u 2 -c", &slice17.trim_end(), expected17)?;
+        Ok(())
+    }
+
+    // Single line input test (CSV mode) - ensure proper header and aggregation
+    #[test]
+    fn single_line_csv() -> Result<(), Box<dyn std::error::Error>> {
+        let input = "k,val,sumfield,avgfield\nA,x,10,2\n"; // single data line after header
+        // Request key k, sum over sumfield, avg over avgfield, unique on val
+        // Indices: k=1, val=2, sumfield=3, avgfield=4
+        let expected = "k:1:k,count,sum:3:sumfield,avg:4:avgfield,cnt_uniq:2:val\nA,1,10,2,1\n";
+        stdin_test_driver("-k k -s sumfield -u val -a avgfield -c --skip_header", input, expected)
+    }
+
     // ------------------ New tests for name-based key field selection ------------------
 
     #[test]
@@ -280,6 +330,35 @@ mod tests {
         assert!(!res.status.success(), "Expected failure due to header mismatch but process succeeded. stderr: {}", String::from_utf8_lossy(&res.stderr));
         let stderr = String::from_utf8_lossy(&res.stderr);
         assert!(stderr.contains("Header mismatch"), "Expected header mismatch error; stderr: {}", stderr);
+        Ok(())
+    }
+
+    // ------------------ Ordering regression tests ------------------
+    // Ensures refactor (spec-based aggregation) preserved original column ordering.
+    #[test]
+    fn ordering_regression_all_ops() -> Result<(), Box<dyn std::error::Error>> {
+        let mut input = String::from("digit,i,j,dvalue\n");
+        input.push_str(&INPUT_SET_1_WITH_FINAL_NEWLINE);
+        let mut cmd = Command::cargo_bin("gb")?;
+        cmd.args([
+            "-k","digit","-s","dvalue","-u","i","-a","digit","-n","dvalue","-N","i","-x","dvalue","-X","i","-t","1","-c","--skip_header"
+        ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        child.stdin.take().unwrap().write_all(input.as_bytes())?;
+        let out = child.wait_with_output()?;
+        assert!(out.status.success(), "Process failed: {} stderr: {}", out.status, String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines = stdout.lines();
+        let header = lines.next().unwrap_or("");
+        let expected_header = EXPECTED_OUT1.lines().next().unwrap();
+        assert_eq!(header, expected_header, "Header ordering changed. Expected: {} Got: {}", expected_header, header);
+        // spot check a couple data lines remain identical
+        let third_line = lines.nth(1).unwrap_or(""); // second data row (digit=1)
+        let expected_third = EXPECTED_OUT1.lines().nth(2).unwrap();
+        assert_eq!(third_line, expected_third, "Data line mismatch after refactor.");
         Ok(())
     }
 }
