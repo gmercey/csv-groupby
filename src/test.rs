@@ -31,12 +31,12 @@ mod tests {
             let k = i as f64 * 2.0f64;
             input_str.push_str(&format!("{},{},{},{}", q, i, j, k));
             if i < 999 {
-                input_str.push_str("\n");
+                input_str.push('\n');
             }
         }
         // eprintln!("LEN: {}", input_str.len());
         if final_newline {
-            input_str.push_str("\n");
+            input_str.push('\n');
         }
         input_str
     }
@@ -89,20 +89,22 @@ mod tests {
         let mut stdin_def = Stdio::piped();
         println!("pipe");
 
-        if input.len() <= 0 {
+        if input.is_empty() {
             stdin_def = Stdio::null();
         }
         cmd.args(args).stdin(stdin_def).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().expect("could NOT start test instance");
         {
-            if input.len() > 0 {
+            if !input.is_empty() {
                 let mut stdin = child.stdin.as_mut().expect("Failed to open stdin");
                 stdin.write_all(input.as_bytes()).expect("Failed to write to stdin");
             }
         }
         println!("post spawn");
-        let predicate_fn = predicate::str::similar(expected_output);
+    // predicates v3 removed `similar` shortcut; use `diff::DiffPredicate` via `str::contains` as a soft check
+    // Since we already assert exact equality above, keep a secondary containment predicate for diagnostic parity.
+    let predicate_fn = predicate::str::contains(expected_output);
         let output = child.wait_with_output().expect("Failed to read stdout");
         // if input.len() > 0 {
         //     eprintln!("Input  : {}...", &input[0..512]);
@@ -110,8 +112,8 @@ mod tests {
         println!("Results:  >>{}<<END", &String::from_utf8_lossy(&output.stdout)[..]);
         println!("Expected: >>{}<<END", expected_output);
         assert_eq!(expected_output, &String::from_utf8_lossy(&output.stdout));
-        assert_eq!(true, predicate_fn.eval(&String::from_utf8_lossy(&output.stdout)));
-        println!("it {:?}", predicate_fn.find_case(true, &String::from_utf8_lossy(&output.stdout)));
+    assert!(predicate_fn.eval(&String::from_utf8_lossy(&output.stdout)));
+    println!("it (predicate contains check passed)");
 
         Ok(())
     }
@@ -175,7 +177,7 @@ mod tests {
         stdin_test_driver(
             "-r ^([^,]+),([^,]+),([^,]+),([^,]+)$ -k 1 -u 3 --write_distros 3 --write_distros_upper 2 --write_distros_bottom 2 -c",
             &INPUT_SET_1_WITH_FINAL_NEWLINE,
-            &EXPECTED_OUT_TABLE_DISTROS,
+            EXPECTED_OUT_TABLE_DISTROS,
         )
     }
 

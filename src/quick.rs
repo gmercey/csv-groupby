@@ -48,25 +48,26 @@ packet
 */
 
 fn sort_parse_key() -> Result<(), std::io::Error> {
-    let mut v = vec![];
-    v.push("9");
-    v.push("dog");
-    v.push("cat");
-    v.push("120");
-    v.push("2|999|10");
-    v.push("1|9|99");
-    v.push("1|9|0");
-    v.push("dog|1000|10");
-    v.push("120");
-    v.push("aaaz");
-    v.push("aaa");
-    v.push("12.0");
-    v.push("Pac");
-    v.push("101");
-    v.push("0");
-    v.push("");
-    v.push("packet");
-    v.push("Cat");
+    let mut v = vec![
+        "9",
+        "dog",
+        "cat",
+        "120",
+        "2|999|10",
+        "1|9|99",
+        "1|9|0",
+        "dog|1000|10",
+        "120",
+        "aaaz",
+        "aaa",
+        "12.0",
+        "Pac",
+        "101",
+        "0",
+        "",
+        "packet",
+        "Cat",
+    ];
 
     let del = '|';
 
@@ -96,7 +97,7 @@ fn sort_parse_key() -> Result<(), std::io::Error> {
                 match (lf, rf) {
                     (Ok(lv), Ok(rv)) => lv.partial_cmp(&rv).unwrap_or(Equal),
                     // fall back to string comparison
-                    (Err(_), Err(_)) => str_cmp_ignore_case(&l, &r), // l.cmp(r),
+                    (Err(_), Err(_)) => str_cmp_ignore_case(l, r), // l.cmp(r),
                     // here Err means not a number while Ok means a number
                     // number is less than string
                     (Ok(_), Err(_)) => Less,

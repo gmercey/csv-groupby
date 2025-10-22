@@ -44,41 +44,7 @@ impl KeySum {
     }
 }
 
-pub fn parse_and_merge_f64<T, F>(_line: &str, record: &T, rec_len: usize, keysum: &mut KeySum, startpos: usize, fields: &Vec<usize>, cfg: &CliCfg, mergefield: F)
-    where
-        <T as std::ops::Index<usize>>::Output: AsRef<str>,
-        T: std::ops::Index<usize> + std::fmt::Debug,
-        F: Fn(&Option<f64>, f64) -> f64
-{
-    for (i, index) in fields.iter().enumerate() {
-        let place = i + startpos;
-        if *index < rec_len {
-            let v = &record[*index].as_ref();
-
-            match v.parse::<f64>() {
-                Err(_) => {
-                    if cfg.verbose > 2 {
-                        eprintln!("error parsing string |{}| as a float for summary: {} so pretending value is 0", v, index);
-                    }
-                }
-                Ok(vv) => keysum.nums[place] = Some(mergefield(&keysum.nums[place], vv)),
-            }
-        }
-    }
-    // before lambdas used... this worked too:
-    /*
-
-    parse_and_merge_f64(line, record, rec_len, &mut brec,
-                        start, &cfg.min_num_fields,
-                        cfg, |dest, new| -> (f64) {
-            match dest {
-                Some(x) => x.min(new),
-                None => new,
-            }
-        });
-
-     */
-}
+// Removed old parse_and_merge_f64 helper (inlined logic kept in store_rec) to reduce dead code.
 
 
 impl SchemaSample {
@@ -88,15 +54,14 @@ impl SchemaSample {
             num,
         }
     }
-    pub fn schema_rec<T>(self: &mut Self, record: &T, rec_len: usize)
+    pub fn schema_rec<T>(&mut self, record: &T, rec_len: usize)
         where
             <T as std::ops::Index<usize>>::Output: AsRef<str>,
             T: std::ops::Index<usize> + std::fmt::Debug,
     {
-        if self.matrix.len() == 0 {
+        if self.matrix.is_empty() {
             for i in 1..rec_len+1 {
-                let mut row = vec![];
-                row.push(i.to_string());
+                let row = vec![i.to_string()];
                 self.matrix.push(row);
             }
         }
@@ -115,15 +80,15 @@ impl SchemaSample {
         }
     }
 
-    pub fn print_schema(self: &mut Self, cfg: &CliCfg) {
-    if self.matrix.is_empty() {
+    pub fn print_schema(&mut self, cfg: &CliCfg) {
+        if self.matrix.is_empty() {
             return;
         } else {
             let mut padding = vec![];
 
             let mut header = vec![];
             header.push("index".to_string());
-            let num_cols = self.matrix.get(0).unwrap().len();
+            let num_cols = self.matrix.first().unwrap().len();
             for c in 1..num_cols {
                 header.push(format!("line{}", c));
             }
@@ -139,10 +104,8 @@ impl SchemaSample {
                 }
             }
 
-            let null_str = String::from("NULL");
-
             for r in 0..self.matrix.len() {
-                let num_cols = self.matrix.get(0).unwrap().len();
+                let num_cols = self.matrix.first().unwrap().len();
                 for c in 0..num_cols {
                     print!("{:>padding$}", self.matrix.get(r).unwrap().get(c).unwrap_or(&cfg.null), padding=padding.get(c).unwrap());
                     if c < num_cols-1 {
@@ -156,37 +119,13 @@ impl SchemaSample {
         std::process::exit(0);
     }
 
-    pub fn done(self: &Self) -> bool {
-    if self.matrix.is_empty() {
-            return false;
-        } else {
-            return self.matrix.get(0).unwrap().len() > self.num as usize
-        }
+    pub fn done(&self) -> bool {
+        !self.matrix.is_empty() && self.matrix.first().unwrap().len() > self.num as usize
     }
 
 }
 
-    pub fn schema_rec<T>(matrix: &mut Vec<Vec<String>>, _ss: &mut String, _line: &str, record: &T, rec_len: usize, _map: &mut MyMap, _cfg: &CliCfg, _rowcount: &mut usize) -> (usize,usize)
-    where
-        <T as std::ops::Index<usize>>::Output: AsRef<str>,
-        T: std::ops::Index<usize> + std::fmt::Debug,
-{
-    if matrix.len() == 0 {
-        for i in 0..rec_len {
-            let mut row = vec![];
-            row.push(i.to_string());
-            matrix.push(row);
-        }
-    }
-
-    for v in matrix {
-        for i in 0 ..rec_len {
-            v.push(String::from(record.index(i).as_ref()));
-        }
-    }
-
-    (0,0)
-}
+// Removed legacy free-function schema_rec (now using SchemaSample::schema_rec method).
 
 pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map: &mut MyMap, cfg: &CliCfg, rowcount: &mut usize) -> (usize,usize,usize)
     where
@@ -202,7 +141,7 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
     use pcre2::bytes::{CaptureLocations as CaptureLocations_pcre2, Captures as Captures_pcre2, Regex as Regex_pre2};
 
     if cfg.verbose >= 3 {
-        if line.len() > 0 {
+    if !line.is_empty() {
             eprintln!("DBG:  {:?}  from: {}", &record, line);
         } else {
             eprintln!("DBG:  {:?}", &record);
@@ -231,17 +170,17 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
         }
     }
 
-    if cfg.key_fields.len() > 0 {
+    if !cfg.key_fields.is_empty() {
         fieldcount += rec_len;
         for i in 0..cfg.key_fields.len() {
             let index = cfg.key_fields[i];
             if index < rec_len {
                 // re.is_match(&record[index].as_ref().as_bytes());
-                ss.push_str(&record[index].as_ref());
+                ss.push_str(record[index].as_ref());
             } else {
                 ss.push_str(&cfg.null);
             }
-            ss.push(KEY_DEL as char);
+            ss.push(KEY_DEL);
         }
         ss.pop(); // remove the trailing KEY_DEL instead of check each iteration
         // we know we get here because of the if above.
@@ -303,17 +242,17 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
         }
     };
 
-    if cfg.sum_fields.len() > 0 {
+    if !cfg.sum_fields.is_empty() {
         mergefields(&cfg.sum_fields, 0, "sum", &sumf64);
     }
-    if cfg.min_num_fields.len() > 0 {
+    if !cfg.min_num_fields.is_empty() {
         mergefields(&cfg.min_num_fields,cfg.sum_fields.len(),"min", &minf64);
     }
-    if cfg.max_num_fields.len() > 0 {
+    if !cfg.max_num_fields.is_empty() {
         mergefields(&cfg.max_num_fields, cfg.min_num_fields.len() + cfg.sum_fields.len(), "max", &maxf64);
     }
 
-    if cfg.avg_fields.len() > 0 {
+    if !cfg.avg_fields.is_empty() {
         for i in 0..cfg.avg_fields.len() {
             let index = cfg.avg_fields[i];
             if index < rec_len {
@@ -333,7 +272,7 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
             }
         }
     }
-    if cfg.unique_fields.len() > 0 {
+    if !cfg.unique_fields.is_empty() {
         for i in 0..cfg.unique_fields.len() {
             let index = cfg.unique_fields[i];
             if index < rec_len {
@@ -341,13 +280,13 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
                     brec.distinct[i].insert(record[index].as_ref().to_string(), 1);
                 } else {
                     let x = brec.distinct[i].get_mut(record[index].as_ref()).unwrap();
-                    *x = *x + 1;
+                    *x += 1;
                 }
             }
         }
     }
 
-    if cfg.min_str_fields.len() > 0 {
+    if !cfg.min_str_fields.is_empty() {
         let start = 0;
         for (i, index) in cfg.min_str_fields.iter().enumerate() {
             let dest = i + start;
@@ -366,7 +305,7 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
         }
     }
 
-    if cfg.max_str_fields.len() > 0 {
+    if !cfg.max_str_fields.is_empty() {
         let start = cfg.min_str_fields.len();
         for (i, index) in cfg.max_str_fields.iter().enumerate() {
             let dest = i + start;
@@ -391,15 +330,15 @@ pub fn store_rec<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, map
 fn merge_f64<F>(x: Option<f64>, y: Option<f64>, pickone: F) -> Option<f64>
     where F: Fn(f64, f64) -> f64
 {
-    return match (x, y) {
+    match (x, y) {
         (Some(old), Some(new)) => Some(pickone(old, new)),
         (Some(old), None) => Some(old),
         (None, Some(new)) => Some(new),
         (_, _) => None,
-    };
+    }
 }
 
-fn merge_string<'a, F>(old: &'a mut Option<String>, new: &'a mut Option<String>, pickone: F) -> ()
+fn merge_string<'a, F>(old: &'a mut Option<String>, new: &'a mut Option<String>, pickone: F)
     where F: Fn(&'a mut Option<String>, &'a mut Option<String>)
 {
     match (&old, &new) {
@@ -472,12 +411,12 @@ pub fn sum_maps(maps: &mut Vec<MyMap>, verbose: usize, cfg: &CliCfg, merge_statu
             }
 
             for j in 0..old.distinct.len() {
-                for (_ii, u) in old.distinct[j].iter().enumerate() {
+                for u in old.distinct[j].iter() {
                     if !new.distinct[j].contains_key(u.0) {
                         new.distinct[j].insert(u.0.clone(), *u.1);
                     } else {
                         let x = new.distinct[j].get_mut(u.0).unwrap();
-                        *x = *x + *u.1;
+                        *x += *u.1;
                     }
                 }
             }
@@ -493,38 +432,4 @@ pub fn sum_maps(maps: &mut Vec<MyMap>, verbose: usize, cfg: &CliCfg, merge_statu
     p_map
 }
 
-/***
-pub fn store_field<T>(ss: &mut String, line: &str, record: &T, rec_len: usize, brec: &mut KeySum, fieldmap: &Vec<usize>, start: usize, cfg: &CliCfg, parse: F) -> ()
-    where
-        T: std::ops::Index<usize> + std::fmt::Debug,
-        F: Fn(&str) -> f64,
-        <T as std::ops::Index<usize>>::Output: AsRef<str>,
-{
-    //
-    let ll = record.iter().len();
-
-    if fieldmap.len() > 0 {
-        for (i, index) in fieldmap.iter().enumerate() {
-            let place = i + start;
-            if *index < rec_len {
-                let v = &record[*index];
-
-                let xv = parse_ref::<f64>(v.as_ref());
-
-                match v.as_ref().parse::<f64>() {
-                    Err(_) => {
-                        if cfg.verbose > 2 {
-                            eprintln!("error parsing string |{}| as a float for summary index: {} so pretending value is 0", v.as_ref(), index);
-                        }
-                    }
-                    Ok(vv) => match &mut brec.nums[place] {
-                        Some(x) => *x += vv,
-                        None => brec.nums[place] = Some(vv),
-                    }
-                }
-            }
-        }
-    }
-}
-
-***/
+// Removed obsolete commented-out store_field prototype.

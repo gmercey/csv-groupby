@@ -7,56 +7,63 @@ use jemalloc_ctl::{epoch, stats};
 #[cfg(not(target_os = "windows"))]
 use jemallocator::Jemalloc;
 
+#[cfg(feature = "memory-tracking")]
 #[derive(Debug)]
 pub struct CounterTlsToAtomicUsize;
+#[cfg(feature = "memory-tracking")]
 #[derive(Debug)]
 pub struct CounterAtomicUsize;
+#[cfg(feature = "memory-tracking")]
 #[derive(Debug)]
 pub struct CounterUsize;
 
+#[cfg(feature = "memory-tracking")]
 static ALLOCATED_TRACKER: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(feature = "memory-tracking")]
 static mut ALLOCATED_NUM: usize = 0;
 
+#[cfg(feature = "memory-tracking")]
 use std::cell::RefCell;
 
+#[cfg(feature = "memory-tracking")]
 pub struct AllocTrackChunk {
     pub count: u32,
     pub sum: usize,
 }
 
+#[cfg(feature = "memory-tracking")]
 struct MemSettings {
     update_count: u32,
     update_bytes: usize,
 }
 
+#[cfg(feature = "memory-tracking")]
 static mut MEM_SETTINGS: MemSettings = MemSettings {
     update_bytes: 256 * 1024,
     update_count: 10,
 };
 
+#[cfg(feature = "memory-tracking")]
 thread_local! {
-    pub static ALLOCS_LOCAL: RefCell<AllocTrackChunk> = RefCell::new(AllocTrackChunk{ count: 0, sum: 0});
-    pub static DEALLOCS_LOCAL: RefCell<AllocTrackChunk> = RefCell::new(AllocTrackChunk{ count: 0, sum: 0});
+    pub static ALLOCS_LOCAL: RefCell<AllocTrackChunk> = const { RefCell::new(AllocTrackChunk{ count: 0, sum: 0}) };
+    pub static DEALLOCS_LOCAL: RefCell<AllocTrackChunk> = const { RefCell::new(AllocTrackChunk{ count: 0, sum: 0}) };
 }
 pub trait GetAlloc {
     fn get_alloc(&self) -> usize;
 }
 
+#[cfg(feature = "memory-tracking")]
 impl GetAlloc for CounterTlsToAtomicUsize {
-    fn get_alloc(&self) -> usize {
-        ALLOCATED_TRACKER.load(Relaxed)
-    }
+    fn get_alloc(&self) -> usize { ALLOCATED_TRACKER.load(Relaxed) }
 }
+#[cfg(feature = "memory-tracking")]
 impl GetAlloc for CounterAtomicUsize {
-    fn get_alloc(&self) -> usize {
-        ALLOCATED_TRACKER.load(Relaxed)
-    }
+    fn get_alloc(&self) -> usize { ALLOCATED_TRACKER.load(Relaxed) }
 }
+#[cfg(feature = "memory-tracking")]
 impl GetAlloc for CounterUsize {
-    fn get_alloc(&self) -> usize {
-        unsafe { ALLOCATED_NUM }
-    }
+    fn get_alloc(&self) -> usize { unsafe { ALLOCATED_NUM } }
 }
 
 impl GetAlloc for System {
@@ -75,6 +82,7 @@ impl GetAlloc for Jemalloc {
 }
 
 
+#[cfg(feature = "memory-tracking")]
 pub fn set_alloc_settings(update_bytes: usize, update_count: u32) {
     unsafe {
         MEM_SETTINGS.update_count = update_count;
@@ -82,14 +90,12 @@ pub fn set_alloc_settings(update_bytes: usize, update_count: u32) {
     }
 }
 
-fn my_track_alloc(size: usize) {
-    ALLOCATED_TRACKER.fetch_add(size, Relaxed);
-}
+#[cfg(feature = "memory-tracking")]
+fn my_track_alloc(size: usize) { ALLOCATED_TRACKER.fetch_add(size, Relaxed); }
+#[cfg(feature = "memory-tracking")]
+fn my_track_dealloc(size: usize) { ALLOCATED_TRACKER.fetch_sub(size, Relaxed); }
 
-fn my_track_dealloc(size: usize) {
-    ALLOCATED_TRACKER.fetch_sub(size, Relaxed);
-}
-
+#[cfg(feature = "memory-tracking")]
 unsafe impl GlobalAlloc for CounterTlsToAtomicUsize {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ret = System.alloc(layout);
@@ -141,6 +147,7 @@ unsafe impl GlobalAlloc for CounterTlsToAtomicUsize {
     }
 }
 
+#[cfg(feature = "memory-tracking")]
 unsafe impl GlobalAlloc for CounterAtomicUsize {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ret = System.alloc(layout);
@@ -157,6 +164,7 @@ unsafe impl GlobalAlloc for CounterAtomicUsize {
 }
 
 // essentially wrong but here to test performance vs others
+#[cfg(feature = "memory-tracking")]
 unsafe impl GlobalAlloc for CounterUsize {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ret = System.alloc(layout);

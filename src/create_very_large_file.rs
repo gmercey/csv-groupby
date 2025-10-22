@@ -12,7 +12,7 @@ fn main() {
         let k = i as f64 * 2.0f64;
         input_str.push_str(&format!("{},{},{},{}", q, i, j, k));
         if i < 999 {
-            input_str.push_str("\n");
+            input_str.push('\n');
         }
     }
     println!("{}", &input_str);

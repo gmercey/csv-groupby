@@ -6,25 +6,19 @@ use std::{
 use bstr::io::BufReadExt;
 use bstr::ByteSlice;
 use std::time::Instant;
-use structopt::StructOpt;
+use clap::{Parser, ArgAction};
 
-#[derive(StructOpt, Debug, Clone)]
-#[structopt(
-global_settings(&[structopt::clap::AppSettings::ColoredHelp, structopt::clap::AppSettings::VersionlessSubcommands, structopt::clap::AppSettings::DeriveDisplayOrder]),
-//raw(setting = "structopt::clap::AppSettings::DeriveDisplayOrder"),
-author, about="appends or prefixes text to line from stdin",
-name="append"
-)]
-
+#[derive(Parser, Debug, Clone)]
+#[command(author, about="appends or prefixes text to line from stdin", name="append")]
 struct AppendCli {
-    #[structopt(short = "p", long = "prefix_str", name = "prefixstr", default_value = "")]
+    #[arg(short = 'p', long = "prefix_str", default_value = "")]
     /// string to prefix to stdout
     pub prefix_str: String,
-    #[structopt(short = "a", long = "append_str", name = "appendstr", default_value = "")]
+    #[arg(short = 'a', long = "append_str", default_value = "")]
     /// string to append to stdout
     pub append_str: String,
 
-    #[structopt(short = "v", parse(from_occurrences))]
+    #[arg(short = 'v', action=ArgAction::Count)]
     /// Verbosity - use more than one v for greater detail
     pub verbose: usize,
 }
@@ -41,25 +35,25 @@ fn main() {
 }
 
 fn _main() -> Result<(), Box<dyn Error>> {
-    let cli: AppendCli = AppendCli::from_args();
+    let cli: AppendCli = AppendCli::parse();
     let start_f = Instant::now();
 
     let stdout = std::io::stdout();
     let _writerlock = stdout.lock();
 
-    let (reader, mut writer) = get_reader_writer();
+    let (mut reader, mut writer) = get_reader_writer();
     reader.for_byte_line(|line| {
-        if line.len() == 0 {
+        if line.is_empty() {
             panic!("test entry from -L (line) was empty")
         }
-        if cli.prefix_str.len() > 0 {
+        if !cli.prefix_str.is_empty() {
             writer.write_all(cli.prefix_str.as_bytes())?;
         }
         writer.write_all(line.as_bytes())?;
-        if cli.append_str.len() > 0 {
+        if !cli.append_str.is_empty() {
             writer.write_all(cli.append_str.as_bytes())?;
         }
-        writer.write_all(&[b'\n' as u8])?;
+        writer.write_all(b"\n")?;
         Ok(true)
     })?;
     writer.flush()?;

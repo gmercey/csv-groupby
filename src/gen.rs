@@ -30,7 +30,6 @@ pub fn gettid() -> usize {
     unsafe { libc::pthread_self() as usize }
 }
 
-#[allow(dead_code)]
 pub fn distro_format<T, S>(map: &HashMap<T, usize, S>, upper: usize, bottom: usize) -> String
     where
         T: std::fmt::Display + std::fmt::Debug + std::clone::Clone + Ord,
@@ -103,122 +102,24 @@ fn test_distro_format() {
     assert_eq!(&res, result, "distro_format cmp failed");
 }
 
-fn mem_metric<'a>(v: usize) -> (f64, &'a str) {
-    const METRIC: [&str; 8] = ["B ", "KB", "MB", "GB", "TB", "PB", "EB", "ZB"];
-
-    let mut size = 1usize << 10;
-    for e in &METRIC {
-        if v < size {
-            return ((v as f64 / (size >> 10) as f64) as f64, e);
-        }
-        size <<= 10;
-    }
-    (v as f64, "")
-}
-
-/// keep only a few significant digits of a simple float value
-fn sig_dig(v: f64, digits: usize) -> String {
-    let x = format!("{}", v);
-    let mut d = String::new();
-    let mut count = 0;
-    let mut found_pt = false;
-    for c in x.chars() {
-        if c != '.' {
-            count += 1;
-        } else {
-            if count >= digits {
-                break;
-            }
-            found_pt = true;
-        }
-
-        d.push(c);
-
-        if count >= digits && found_pt {
-            break;
-        }
-    }
-    d
-}
-
+/// Format bytes into human readable units with up to `sig` significant digits.
+/// Example: mem_metric_digit(1024,4) => "    1 KB"
+#[cfg(feature = "stats")]
 pub fn mem_metric_digit(v: usize, sig: usize) -> String {
-    if v == 0 || v > std::usize::MAX / 2 {
-        return format!("{:>width$}", "unknown", width = sig + 3);
-    }
-    let vt = mem_metric(v);
-    format!("{:>width$} {}", sig_dig(vt.0, sig), vt.1, width = sig + 1, )
+    if v == 0 || v > usize::MAX / 2 { return format!("{:>width$}", "unknown", width = sig + 3); }
+    const METRIC: [&str; 8] = ["B ", "KB", "MB", "GB", "TB", "PB", "EB", "ZB"];
+    let mut size = 1usize << 10;
+    let mut unit = "";
+    for m in &METRIC { if v < size { unit = m; break; } size <<= 10; }
+    let base = (size >> 10) as f64;
+    let value = v as f64 / base;
+    let mut s = format!("{}", value);
+    s.truncate(sig + 1);
+    if s.ends_with('.') { s.pop(); }
+    format!("{:>width$} {}", s, unit, width = sig + 1)
 }
-
-#[test]
-fn test_mem_metric_digit() -> Result<(), Box<dyn std::error::Error>> {
-    for t in &[
-        (0, "unknown"),
-        (1, "    1 B "),
-        (5, "    5 B "),
-        (1024, "    1 KB"),
-        (2524, "2.464 KB"),
-        (1024 * 999, "  999 KB"),
-        (1024 * 1023, " 1023 KB"),
-        (11usize << 40, "   11 TB"),
-    ] {
-        //let v = mem_metric(*t);
-        assert_eq!(mem_metric_digit(t.0, 4), t.1, "mem_metric_digit test");
-        println!("{}\n>>>{}<<<\n", t.0, mem_metric_digit(t.0, 4));
-    }
-    Ok(())
-}
-
-pub fn greek(v: f64) -> String {
-    const GR_BACKOFF: f64 = 24.0;
-    const GROWTH: f64 = 1024.0;
-    const KK: f64 = GROWTH;
-    const MM: f64 = KK * GROWTH;
-    const GG: f64 = MM * GROWTH;
-    const TT: f64 = GG * GROWTH;
-    const PP: f64 = TT * GROWTH;
-
-    let a = v.abs();
-    // println!("hereZ {}  {}  {}", v, MM-(GR_BACKOFF*KK), GG-(GR_BACKOFF*MM));
-    let t = if a > 0.0 && a < KK - GR_BACKOFF {
-        (v, "B")
-    } else if a >= KK - GR_BACKOFF && a < MM - (GR_BACKOFF * KK) {
-        // println!("here {}", v);
-        (v / KK, "K")
-    } else if a >= MM - (GR_BACKOFF * KK) && a < GG - (GR_BACKOFF * MM) {
-        // println!("here2 {}  {}  {}", v, MM-(GR_BACKOFF*KK), GG-(GR_BACKOFF*MM));
-        (v / MM, "M")
-    } else if a >= GG - (GR_BACKOFF * MM) && a < TT - (GR_BACKOFF * GG) {
-        // println!("here3 {}", v);
-        (v / GG, "G")
-    } else if a >= TT - (GR_BACKOFF * GG) && a < PP - (GR_BACKOFF * TT) {
-        // println!("here4 {}", v);
-        (v / TT, "T")
-    } else {
-        // println!("here5 {}", v);
-        (v / PP, "P")
-    };
-
-    let mut s = format!("{}", t.0);
-    s.truncate(4);
-    if s.ends_with('.') {
-        s.pop();
-    }
-
-    format!("{}{}", s, t.1)
-    // match v {
-    // 	(std::ops::Range {start: 0, end: (KK - GR_BACKOFF)}) => v,
-    // 	//KK-GR_BACKOFF .. MM-(GR_BACKOFF*KK)			=> v,
-    // 	_ => v,
-    // }
-}
-
-pub fn user_pause() {
-    println!("hi enter to continue...");
-    let mut buf: [u8; 1] = [0; 1];
-    let stdin = ::std::io::stdin();
-    let mut stdin = stdin.lock();
-    let _it = stdin.read(&mut buf[..]);
-}
+#[cfg(not(feature = "stats"))]
+pub fn mem_metric_digit(v: usize, _sig: usize) -> String { v.to_string() }
 
 #[derive(Default, Debug)]
 pub struct IoSlicerStatus {
@@ -227,29 +128,15 @@ pub struct IoSlicerStatus {
     pub curr_file: Mutex<String>,
 }
 
-impl IoSlicerStatus {
-    pub fn new() -> IoSlicerStatus {
-        IoSlicerStatus {
-            bytes: AtomicUsize::new(0),
-            files: AtomicUsize::new(0),
-            curr_file: Mutex::new(String::new()),
-        }
-    }
-}
+// new() replaced by Default derive
 
+#[derive(Default, Debug)]
 pub struct MergeStatus {
     pub current: AtomicUsize,
     pub total: AtomicUsize,
 }
 
-impl MergeStatus {
-    pub fn new() -> MergeStatus {
-        MergeStatus {
-            current: AtomicUsize::new(0),
-            total: AtomicUsize::new(0),
-        }
-    }
-}
+// new() replaced by Default derive
 
 #[derive(Debug)]
 pub struct FileSlice {
@@ -261,38 +148,36 @@ pub struct FileSlice {
 }
 
 fn fill_buff(handle: &mut dyn Read, buff: &mut [u8]) -> Result<usize, std::io::Error> {
-    // eprintln!("call fill");
-    let mut sz = handle.read(&mut buff[..])?;
-    // eprintln!("mid read: {}", sz);
+    let mut sz = handle.read(buff)?;
     loop {
-        if sz == 0 {
-            return Ok(sz);
-        } else if sz == buff.len() {
-            return Ok(sz);
-        }
-
+        if sz == 0 || sz == buff.len() { return Ok(sz); }
         let sz2 = handle.read(&mut buff[sz..])?;
-        // eprintln!("mid2 read: {}", sz2);
-
-        if sz2 == 0 {
-            return Ok(sz);
-        } else {
-            sz += sz2;
-        }
+        if sz2 == 0 { return Ok(sz); }
+        sz += sz2;
     }
 }
 
+pub struct IoThreadCtx {
+    pub recv_blocks: crossbeam_channel::Receiver<Vec<u8>>,
+    pub send_fileslice: crossbeam_channel::Sender<Option<FileSlice>>,
+    pub status: Arc<IoSlicerStatus>,
+    pub verbosity: usize,
+    pub block_size: usize,
+    pub recycle_disable: bool,
+}
+
 pub fn io_thread_slicer(
-    recv_blocks: &crossbeam_channel::Receiver<Vec<u8>>,
+    ctx: &IoThreadCtx,
     currfilename: &dyn Display,
     file_subgrps: &[String],
-        block_size: usize,
-    recycle_io_blocks_disable: bool,
-    verbosity: usize,
     handle: &mut dyn Read,
-    status: &mut Arc<IoSlicerStatus>,
-    send: &crossbeam_channel::Sender<Option<FileSlice>>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let recv_blocks = &ctx.recv_blocks;
+    let send_fileslice = &ctx.send_fileslice;
+    let status = &ctx.status;
+    let verbosity = ctx.verbosity;
+    let block_size = ctx.block_size;
+    let recycle_disable = ctx.recycle_disable;
     if verbosity >= 2 {
         eprintln!("Using block_size {} bytes", block_size);
     }
@@ -312,7 +197,7 @@ pub fn io_thread_slicer(
     let mut last_left_len;
     let mut curr_pos = 0usize;
     loop {
-        let mut block = if !recycle_io_blocks_disable { recv_blocks.recv()? } else { vec![0u8; block_size] };
+    let mut block = if !recycle_disable { recv_blocks.recv()? } else { vec![0u8; block_size] };
         if left_len > 0 {
             block[0..left_len].copy_from_slice(&holdover[0..left_len]);
         }
@@ -349,7 +234,7 @@ pub fn io_thread_slicer(
                 if !apparent_eof {
                     eprintln!("WARNING: sending no EOL found in block around file:pos {}:{} ", currfilename, curr_pos);
                 }
-                send.send(Some(FileSlice {
+                send_fileslice.send(Some(FileSlice {
                     block,
                     len: sz + last_left_len,
                     index: block_count,
@@ -368,7 +253,7 @@ pub fn io_thread_slicer(
                 if verbosity > 2 {
                     eprintln!("sending found EOL at {} ", end + 1);
                 }
-                send.send(Some(FileSlice {
+                    send_fileslice.send(Some(FileSlice {
                     block,
                     len: end + 1,
                     index: block_count,
@@ -382,7 +267,7 @@ pub fn io_thread_slicer(
             if verbosity > 2 {
                 eprintln!("sending tail len {} on file: {} ", left_len, currfilename);
             }
-            send.send(Some(FileSlice {
+            send_fileslice.send(Some(FileSlice {
                 block,
                 len: left_len,
                 index: block_count,
@@ -408,7 +293,9 @@ pub fn caps_to_vec_strings(caps: &Captures_pcre2) -> Vec<String> {
     v
 }
 
-pub fn subs_from_path_buff(path: &PathBuf, regex: &Option<Regex_pre2>) -> (bool, Vec<String>) {
+use std::path::Path;
+
+pub fn subs_from_path_buff(path: &Path, regex: &Option<Regex_pre2>) -> (bool, Vec<String>) {
     let v = vec![];
     match regex {
         None => (true, v),
@@ -421,17 +308,28 @@ pub fn subs_from_path_buff(path: &PathBuf, regex: &Option<Regex_pre2>) -> (bool,
     }
 }
 
+pub struct PerFileCtx {
+    pub recv_blocks: crossbeam_channel::Receiver<Vec<u8>>,
+    pub recv_pathbuff: crossbeam_channel::Receiver<Option<PathBuf>>,
+    pub send_fileslice: crossbeam_channel::Sender<Option<FileSlice>>,
+    pub io_block_size: usize,
+    pub block_size: usize,
+    pub verbosity: usize,
+    pub recycle_disable: bool,
+}
+
 pub fn per_file_thread(
-    recycle_io_blocks_disable: bool,
-    recv_blocks: &crossbeam_channel::Receiver<Vec<u8>>,
-    recv_pathbuff: &crossbeam_channel::Receiver<Option<PathBuf>>,
-    send_fileslice: &crossbeam_channel::Sender<Option<FileSlice>>,
-    io_block_size: usize,
-    block_size: usize,
-    verbosity: usize,
-    mut io_status: Arc<IoSlicerStatus>,
+    ctx: PerFileCtx,
+    io_status: Arc<IoSlicerStatus>,
     path_re: &Option<Regex_pre2>,
 ) -> (usize, usize) {
+    let recv_blocks = ctx.recv_blocks;
+    let recv_pathbuff = ctx.recv_pathbuff;
+    let send_fileslice = ctx.send_fileslice;
+    let io_block_size = ctx.io_block_size;
+    let block_size = ctx.block_size;
+    let verbosity = ctx.verbosity;
+    let recycle_disable = ctx.recycle_disable;
     let mut block_count = 0usize;
     let mut bytes = 0usize;
     loop {
@@ -445,7 +343,7 @@ pub fn per_file_thread(
             }
         };
         if verbosity > 2 { eprintln!("considering path: {}", filename.display()); }
-        let (file_matched, file_subgrps) = subs_from_path_buff(&filename, &path_re);
+    let (file_matched, file_subgrps) = subs_from_path_buff(filename.as_path(), path_re);
         if !file_matched {
             if verbosity > 0 { eprintln!("file: {} did not match expected pattern", filename.display()); }
             continue;
@@ -468,7 +366,7 @@ pub fn per_file_thread(
                 Some(i) => String::from(&filename.to_str().unwrap()[i..]),
             }
         };
-        let mut rdr: Box<dyn Read> = match &ext[..] {
+    let mut rdr: Box<dyn Read> = match &ext[..] {
             ".gz" | ".tgz" => {
                 match File::open(&filename) {
                     Ok(f) => if block_size != 0 {
@@ -531,16 +429,19 @@ pub fn per_file_thread(
                 }
             },
         };
+        let io_ctx = IoThreadCtx {
+            recv_blocks: recv_blocks.clone(),
+            send_fileslice: send_fileslice.clone(),
+            status: io_status.clone(),
+            verbosity,
+            block_size,
+            recycle_disable,
+        };
         match io_thread_slicer(
-            &recv_blocks,
+            &io_ctx,
             &filename.display(),
             &file_subgrps,
-            block_size,
-            recycle_io_blocks_disable,
-            verbosity,
             &mut rdr,
-            &mut io_status,
-            &send_fileslice,
         ) {
             Ok((bc, by)) => {
                 block_count += bc;

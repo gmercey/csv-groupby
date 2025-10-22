@@ -36,13 +36,13 @@ pub fn testre(c: &CliCfg) -> Result<(), Box<dyn std::error::Error>> {
 
     if !c.testlines.is_empty() {
         for l in &c.testlines {
-            teststr(&re, &l, &sre, c.verbose)?;
+            teststr(&re, l, sre, c.verbose.into())?;
         }
     } else {
         eprintln!("<<< waiting on input lines");
         let stdin = std::io::stdin();
         for l in stdin.lock().lines().map(|l| l.unwrap()) {
-            teststr(&re, &l, &sre, c.verbose)?;
+            teststr(&re, &l, sre, c.verbose.into())?;
         }
     }
     Ok(())

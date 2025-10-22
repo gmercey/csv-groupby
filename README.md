@@ -1,11 +1,77 @@
 # csv-groupby
 ## `gb`   A Command that does a SQL like "group by" on delimited files OR arbitrary lines of text
 
-[![Rust](https://github.com/sflanaga/csv-groupby/actions/workflows/rust.yml/badge.svg)](https://github.com/sflanaga/csv-groupby/actions/workflows/rust.yml)
+[![CI](https://github.com/sflanaga/csv-groupby/actions/workflows/ci.yml/badge.svg)](https://github.com/sflanaga/csv-groupby/actions/workflows/ci.yml)
 
-gb is a command that takes delimited data (like csv files) or lines of text (like a log file) and emulates 
-a SQL-select-group-by on that data.  This is a utility partially inspired by [xsv](https://github.com/BurntSushi/xsv) 
-and the desire to stop having to write the same perl one-liners to analyze massive log files.
+gb (current: 0.20.0) is a command that takes delimited data (like csv files) or lines of text (like a log file) and
+emulates a SQL style select .. group by over that data.  It is partially inspired by
+[xsv](https://github.com/BurntSushi/xsv) and the desire to stop writing the same ad‑hoc perl/awk one‑liners
+for large log analysis.
+
+## 0.20.0 Highlights
+- Migrated CLI from structopt to clap 4 (derive) – improved help formatting & future-proof flags
+- Upgraded core dependencies (regex 1.10, crossbeam 0.8, prettytable-rs 0.10, crossterm 0.27, zstd 0.13, itertools 0.13, etc.)
+- Added Criterion benchmark harness (`benches/basic.rs`) to start tracking performance trends
+- Added pinned MSRV via `rust-toolchain.toml` (Rust 1.90.0)
+- Initial clippy hygiene pass (many needless allocations & len() checks cleaned; further refinements queued)
+
+## Feature Flags (modular build)
+The binary now uses Cargo feature flags to let you opt into diagnostic overhead only when you need it.
+
+Current features:
+
+* `core-io` (default): Core parsing, regex/csv processing, decompression, aggregation logic.
+* `stats` (default): Enables the live ticker and human friendly memory formatting used in the summary output.
+* `memory-tracking` (opt‑in): Adds an allocator instrumentation layer to report approximate in‑process allocation totals. Slight throughput impact; disable for pure performance runs.
+
+### Build combinations
+Minimal (no diagnostics):
+```
+cargo build --release --no-default-features --features core-io
+```
+
+Core + stats (default set):
+```
+cargo build --release
+```
+
+All features (including memory tracking):
+```
+cargo build --release --features "stats memory-tracking"
+```
+
+Disable only stats (keep memory tracking for a targeted test):
+```
+cargo build --release --no-default-features --features "core-io memory-tracking"
+```
+
+### Runtime differences
+* Without `stats`: No periodic ticker thread; summary prints raw byte counts without human digit grouping.
+* With `stats`: Periodic progress line (records/sec, MB/s, memory); humanized memory sizes.
+* With `memory-tracking`: Extra memory metrics collected; small overhead (generally <5%).
+
+### When to toggle
+* High throughput batch processing: Prefer disabling `stats` and `memory-tracking`.
+* Interactive exploration / sizing runs: Enable `stats`.
+* Memory profiling / allocator regression checks: Enable `memory-tracking` (optionally keep `stats`).
+
+### Quick usage examples
+Group by on a gzipped file (decompression auto‑handled):
+```
+cargo run --release -- -f data/log.gz -k 2,5 -s 9 --csv_output
+```
+
+Same command without ticker noise:
+```
+cargo run --release --no-default-features --features core-io -- -f data/log.gz -k 2,5 -s 9 --csv_output
+```
+
+Enable memory instrumentation for a focused run:
+```
+cargo run --release --features "memory-tracking" -- -f data/log.gz -k 2,5 -s 9 --csv_output
+```
+
+> Note: Feature selection is compile‑time; recompile when switching.
 
 It does this job very fast by "slicing" blocks of data on line boundary points and forwarding those line-even blocks to multiple parser threads.
 There are also multiple IO threads when list of files are provided as a data source.
@@ -23,7 +89,7 @@ There are also multiple IO threads when list of files are provided as a data sou
 
 
 
-## HOW-TO:
+## HOW-TO
 
 You identify fields as column numbers.  
 These will either be part of the "key" or group-by, an aggregate (avg or sum), or count distinct.  
