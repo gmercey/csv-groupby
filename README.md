@@ -1,9 +1,9 @@
 # csv-groupby
 ## `gb`   A Command that does a SQL like "group by" on delimited files OR arbitrary lines of text
 
-[![CI](https://github.com/sflanaga/csv-groupby/actions/workflows/ci.yml/badge.svg)](https://github.com/sflanaga/csv-groupby/actions/workflows/ci.yml)
+[![CI](https://github.com/gmercey/csv-groupby/actions/workflows/ci.yml/badge.svg)](https://github.com/gmercey/csv-groupby/actions/workflows/ci.yml)
 
-gb (current: 0.20.0) is a command that takes delimited data (like csv files) or lines of text (like a log file) and
+gb (current: `0.20.0`) is a command that takes delimited data (like csv files) or lines of text (like a log file) and
 emulates a SQL style select .. group by over that data.  It is partially inspired by
 [xsv](https://github.com/BurntSushi/xsv) and the desire to stop writing the same ad‑hoc perl/awk one‑liners
 for large log analysis.
@@ -23,6 +23,7 @@ Current features:
 * `core-io` (default): Core parsing, regex/csv processing, decompression, aggregation logic.
 * `stats` (default): Enables the live ticker and human friendly memory formatting used in the summary output.
 * `memory-tracking` (opt‑in): Adds an allocator instrumentation layer to report approximate in‑process allocation totals. Slight throughput impact; disable for pure performance runs.
+* `fast-hash` (opt‑in): Uses `hashbrown::HashMap<String, KeySum, ahash::RandomState>` for the primary aggregation map and upgraded distinct maps. Significantly faster inserts/lookups on high‑cardinality workloads but iteration order is non‑deterministic (sorting still works; natural BTree ordering is lost).
 
 ### Build combinations
 Minimal (no diagnostics):
@@ -33,18 +34,23 @@ Minimal (no diagnostics):
  - Optional fast hashing (`--features fast-hash`) switching key maps & large distinct maps to `hashbrown + ahash` for higher throughput (default BTreeMap remains for deterministic ordering when feature is off).
  - Predicate short‑circuit fusion combines `--where_re` and `--where_not_re` evaluation into one pass per record.
  - Memory instrumentation flag `--mem-stats` summarizing distinct store usage (small vs map slots, total distinct entries, avg entries/slot).
-```
+
+```bash
 cargo build --release
 ```
 
 All features (including memory tracking):
-```
+
+```bash
 cargo build --release --features "stats memory-tracking"
 ```
 
 Disable only stats (keep memory tracking for a targeted test):
-```
+
+```bash
 cargo build --release --no-default-features --features "core-io memory-tracking"
+```
+
 * Without `stats`: No periodic ticker thread; summary prints raw byte counts without human digit grouping.
 * With `stats`: Periodic progress line (records/sec, MB/s, memory); humanized memory sizes.
 * With `memory-tracking`: Extra memory metrics collected; small overhead (generally <5%).
@@ -56,21 +62,37 @@ cargo build --release --no-default-features --features "core-io memory-tracking"
 
 ### Quick usage examples
 Group by on a gzipped file (decompression auto‑handled):
-```
+
+```bash
 cargo run --release -- -f data/log.gz -k 2,5 -s 9 --csv_output
 ```
 
 Same command without ticker noise:
-```
+
+```bash
 cargo run --release --no-default-features --features core-io -- -f data/log.gz -k 2,5 -s 9 --csv_output
 ```
 
 Enable memory instrumentation for a focused run:
-```
+
+```bash
 cargo run --release --features "memory-tracking" -- -f data/log.gz -k 2,5 -s 9 --csv_output
 ```
 
 > Note: Feature selection is compile‑time; recompile when switching.
+
+Enable fast hashing (throughput focus only):
+```bash
+cargo build --release --features "fast-hash"
+```
+Combine with stats (ticker) but without memory-tracking:
+```bash
+cargo build --release --features "core-io stats fast-hash" --no-default-features
+```
+Run with fast-hash:
+```bash
+cargo run --release --features "fast-hash" -- -f data/log.gz -k 2,5 -s 9 --csv_output
+```
 
 It does this job very fast by "slicing" blocks of data on line boundary points and forwarding those line-even blocks to multiple parser threads.
 There are also multiple IO threads when list of files are provided as a data source.
@@ -107,17 +129,17 @@ All of these accept a comma‑separated list of either numbers, names, or a mix.
 Resolution occurs in a single pre-scan of the header (stdin buffered or each file's first line) before worker threads start. Multi‑file mode enforces identical headers.
 
 Example (stdin, mixed key + aggregates by name):
-```
+```bash
 printf 'digit,i,j,dvalue\n0,1,10,0\n1,2,20,2\n' | \
     gb -k digit -s dvalue -a digit -u i -n dvalue -x dvalue --skip_header --csv_output
 ```
 Sample header line produced (indices become 1-based in output; names included when known):
-```
+```bash
 k:1:digit,count,sum:4:dvalue,avg:1:digit,cnt_uniq:2:i,min:4:dvalue,max:4:dvalue
 ```
 
 Another example mixing numeric & names:
-```
+```bash
 gb -f events.csv -k 1,video_id -s views,total_duration --skip_header --csv_output
 ```
 If the header starts with `date,video_id,views,total_duration,...` the keys resolve to indices 1 & 2; sums to indices 3 & 4. Duplicate or overlapping specifications are de‑duplicated after resolution.
@@ -132,7 +154,7 @@ Requirements & Notes:
 * Distribution fields specified with `-D` must also appear (by index or name) in the `-u` unique list; this is validated after resolution when names are used.
 
 Errors:
-```
+```bash
 Missing header name(s) for -k: some_missing_column
 Missing header name(s) for -s: duration_ms
 write_distro specifies field 7 that is not a subset of the unique_keys
@@ -148,6 +170,30 @@ Limitations / Future Work:
 
 Tip: If you want stable scripts across schema changes, prefer names; they fail fast if a required column is removed or renamed.
 
+### Fast Hash Feature Details
+The `fast-hash` feature swaps the main grouping map (and large distinct maps post-upgrade) from a `BTreeMap` to a `hashbrown::HashMap` using `ahash` for its hashing algorithm.
+
+Benefits:
+* Faster insert & lookup for large key sets (often 1.2x–2x speedup on aggregation-heavy, high-cardinality datasets).
+* Reduced pointer chasing relative to BTree nodes for random key distributions.
+
+Trade-offs:
+* Non-deterministic iteration order; if you rely on natural key ordering in output disable this feature or ensure `--disable_key_sort` is NOT used and let the post-aggregation sort run.
+* Output stability across different machines / runs is affected unless you explicitly sort keys (sorting preserves determinism regardless of map type).
+* AHash uses random seeds; reproducible perf benchmarking should either sort output or capture only timing metrics.
+
+Recommendations:
+* Enable on large logs / datasets with hundreds of thousands to millions of distinct grouping keys.
+* Keep disabled for golden test generation that depends on raw unsorted traversal order or for human diff comparisons.
+* Always combine with explicit sorting (default behavior) if you need deterministic CSV output order for downstream tooling.
+
+Memory Notes:
+* `hashbrown` generally uses less overhead than a BTree for very large sparse key sets though per-entry footprint still dominated by key string & aggregate vectors.
+* Distinct map upgrades benefit similarly (faster distinct insertion & merge).
+
+Testing Caveat:
+* Internal tests expecting a particular natural key iteration order should not run with `fast-hash` unless they perform an explicit sort first.
+
 
 
 ### Summaries on a csv file:
@@ -156,7 +202,8 @@ Using some airline flight data taken from:
 http://stat-computing.org/dataexpo/2009/2008.csv.bz2
 
 >*Note that this data is truncated a bit here and reformated from this csv to make it readable.*
-```
+
+```bash
   1     2        3           4         5         6          7          8           9
 
 Year  Month  DayofMonth  DayOfWeek  DepTime  CRSDepTime  ArrTime  CRSArrTime  UniqueCarrier  ...
@@ -171,13 +218,16 @@ Year  Month  DayofMonth  DayOfWeek  DepTime  CRSDepTime  ArrTime  CRSArrTime  Un
 2008  1      3           4          617      615         652      650         WN             ...
 ....
 ```
+
 Running the command:
-```
+
+```bash
 gb -f 2008.csv -k 2,9 -s 14 --skip_header -c | head -10
 ```
 
 How this command corresponds to the SQL:
-```
+
+```bash
 select Month, UniqueCarrier, count(*), sum(AirTime) from csv group by Month, UniqueCarrier
        ^              ^                     ^
        |              |                     |
@@ -185,7 +235,8 @@ select Month, UniqueCarrier, count(*), sum(AirTime) from csv group by Month, Uni
 ```
 
 Here's a partial output:
-``` 
+
+``` bash
  k:2 | k:9 | count  | s:14    | a:14
 -----+-----+--------+---------+--------------------
  1   | 9E  | 22840  | 1539652 | 71.22412915760744
@@ -201,18 +252,19 @@ Here's a partial output:
 
 Another example that determines number of airplanes used and time spent in the air by that carrier.
 
-```
+```bash
 select Carrier, count(*), sum(AirTime), count(distinct TailNum), sum(AirTime) average(AirTime) from csv 
 group by Carrier
 ```
 The following command emulates this:
-```
+```bash
 gb -f ~/dl/2008.csv -k 9 -s 14 -u 11 -s 14 -a 14 --skip_header
 ```
 
 Output:
 > *Note that the output order of the columns does not correspond to the order of the field options.  It is fixed to keys, count, sums, avgs, and then uniques.*
-```
+
+```bash
  k:9 | count   | s:14      | s:14      | a:14               | u:11
 -----|---------|-----------|-----------|--------------------|------
  9E  | 262109  | 18080077  | 18080077  | 71.11840692300127  | 162
@@ -222,7 +274,7 @@ Output:
  B6  | 196018  | 28849406  | 28849406  | 150.22524356777978 | 154
  CO  | 298342  | 45784515  | 45784515  | 155.86589297447088 | 378
  ...
- ```
+```
 
 ## Summaries on arbitrary text
 #### Using regular expression sub groups as data fields.
@@ -231,9 +283,11 @@ Alternatively, you can use a regular expression (see -r option) against the line
 This example will peal off the date from mayapp log files and summarize the ERROR based on the first 5 to 40 characters of that line.
 
 This is example of using the file path as part of the reporting.  
-```
+
+```bash
  gb --walk /some/log/directory -p 'myapp.*(2019-\d\d-\d\d).log' -r '.*ERROR(.{5,40}).*' -k 1,2
 ```
+
 Here the subgroups of 1 and 2 are used to create a composite key of the date from the log file name, and the bit of text after the ERROR string in the log file.
 
 ## Test RE Mode
@@ -241,7 +295,8 @@ If you want to test how how a line of text and your regular expression interact 
 
 
 ## Help  `gb -h`
-```
+
+```bash
 csv-groupby ver: 0.8.2  rev: 194704d  date: 2020-08-29
 Execute a sql-like group-by on arbitrary text or csv files. Field indices start at 1.
 
@@ -302,10 +357,9 @@ OPTIONS:
         --null_write <nullstring>                     String to use for NULL fields [default: NULL]
 ```
             
-TODO/ideas:  
+## TODO/ideas:  
 
-```
-
+```bash
 --where 1:<re>
 --where_not 1:<re>
 --tail &| --head
