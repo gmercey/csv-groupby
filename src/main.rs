@@ -552,13 +552,13 @@ fn csv() -> Result<(), Box<dyn std::error::Error>> {
     // write the data structure
     //
 
-    // restore indexes to users input - really just makes testing slightly easier
+    // Experimental index adjuster kept for future output/index experiments.
+    // Only build with dev-tools to avoid dead_code noise in normal builds.
+    #[cfg(dev_tools)]
     fn re_mod_idx<T>(_cfg: &CliCfg, v: T) -> T
-        where
-            T: std::ops::Sub<Output=T> + std::ops::Add<Output=T> + From<usize>,
-    {
-        v + 1.into()
-    }
+    where
+        T: std::ops::Sub<Output = T> + std::ops::Add<Output = T> + From<usize>,
+    { v + 1.into() }
     if do_ticker {
         eprintln!();
     } // write extra line at the end of stderr in case the ticker munges things
@@ -1292,6 +1292,7 @@ fn worker_multi_re(send_blocks: &crossbeam_channel::Sender<Vec<u8>>, cfg: &CliCf
     }
 }
 
+#[cfg(dev_tools)]
 fn reused_str_vec(idx: usize, v: &mut Vec<String>, s: &str) {
     if idx < v.len() {
         v[idx].clear();

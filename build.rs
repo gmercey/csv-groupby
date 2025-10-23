@@ -4,6 +4,8 @@ fn main() {
     } else {
         println!("cargo:rustc-env=BUILD_GIT_HASH=GIT FAILED");
     }
+    // Declare custom cfg so rustc's check-cfg lint knows about it (used to gate dev helpers)
+    println!("cargo:rustc-check-cfg=cfg(dev_tools)");
 }
 
 fn git_revision_hash() -> Option<String> {

@@ -66,20 +66,11 @@ impl GetAlloc for CounterUsize {
     fn get_alloc(&self) -> usize { unsafe { ALLOCATED_NUM } }
 }
 
-impl GetAlloc for System {
-    fn get_alloc(&self) -> usize {
-        0
-    }
-}
+impl GetAlloc for System { fn get_alloc(&self) -> usize { 0 } }
 
 
 #[cfg(not(target_os = "windows"))]
-impl GetAlloc for Jemalloc {
-    fn get_alloc(&self) -> usize {
-        epoch::advance().unwrap();
-        stats::active::read().unwrap()
-    }
-}
+impl GetAlloc for Jemalloc { fn get_alloc(&self) -> usize { epoch::advance().unwrap(); stats::active::read().unwrap() } }
 
 
 #[cfg(feature = "memory-tracking")]

@@ -106,6 +106,8 @@ memory-tracking = []
 # Enable runtime statistics ticker & human readable metrics
 stats = []
 fast-hash = ["hashbrown", "ahash"]
+# NOTE: Experimental developer helpers moved to a manual cfg flag `dev_tools` (set via RUSTFLAGS --cfg dev_tools)
+# so that `--all-features` builds remain clean without pulling them in.
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }

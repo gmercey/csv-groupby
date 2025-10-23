@@ -1,3 +1,16 @@
+// NOTE: This module contains a number of experimental / legacy helpers for:
+//  - streaming / sliced IO over multiple files
+//  - on-the-fly decompression for many formats
+//  - path / regex capture based subgroup extraction
+//  - distribution formatting utilities
+//  - prospective multi-threaded per-file processing
+// These are not currently wired into the main execution path, so the compiler
+// reports a large set of dead_code warnings that add noise to normal builds.
+// We keep the code to enable rapid iteration on upcoming features without
+// needing to resurrect it from git history. When individual pieces become
+// actively used, this blanket allow should be narrowed or removed.
+#![allow(dead_code)]
+
 use grep_cli::DecompressionReader;
 use std::collections::HashMap;
 use std::fmt::Display;

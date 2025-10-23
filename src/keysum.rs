@@ -52,10 +52,7 @@ impl DistinctStore {
                 if v.len() > DISTINCT_SMALL_THRESHOLD { self.ensure_map(); }
             }
             DistinctStore::Map(m) => {
-                match m.entry(key.to_string()) {
-                    std::collections::hash_map::Entry::Vacant(e) => { e.insert(1); },
-                    std::collections::hash_map::Entry::Occupied(mut o) => { *o.get_mut() += 1; },
-                }
+                m.entry(key.to_string()).and_modify(|c| *c += 1).or_insert(1);
             }
         }
     }
@@ -79,10 +76,7 @@ impl DistinctStore {
                 if v.len() > DISTINCT_SMALL_THRESHOLD { self.ensure_map(); }
             }
             DistinctStore::Map(m) => {
-                match m.entry(key) {
-                    std::collections::hash_map::Entry::Vacant(e) => { e.insert(add); },
-                    std::collections::hash_map::Entry::Occupied(mut o) => { *o.get_mut() += add; },
-                }
+                m.entry(key).and_modify(|c| *c += add).or_insert(add);
             }
         }
     }
@@ -153,16 +147,20 @@ impl SchemaSample {
         for c in 1..num_cols { header.push(format!("line{}", c)); }
         self.matrix.insert(0, header);
         let mut padding: Vec<usize> = vec![];
-        for r in 0..self.matrix.len() {
-            for (c, cell) in self.matrix[r].iter().enumerate() {
+        for row in &self.matrix {
+            for (c, cell) in row.iter().enumerate() {
                 let this_len = cell.len();
-                if let Some(p) = padding.get_mut(c) { *p = (*p).max(this_len); } else { padding.push(this_len); }
+                if let Some(p) = padding.get_mut(c) {
+                    *p = (*p).max(this_len);
+                } else {
+                    padding.push(this_len);
+                }
             }
         }
-        for r in 0..self.matrix.len() {
-            let num_cols = self.matrix[r].len();
-            for c in 0..num_cols {
-                print!("{:>width$}", self.matrix[r][c], width = padding[c]);
+        for row in &self.matrix {
+            let num_cols = row.len();
+            for (c, cell) in row.iter().enumerate() {
+                print!("{:>width$}", cell, width = padding[c]);
                 if c < num_cols - 1 { print!("{} ", cfg.od); } else { println!(); }
             }
         }
@@ -397,7 +395,7 @@ pub fn sum_maps(maps: &mut Vec<MyMap>, verbose: usize, cfg: &CliCfg, merge_statu
     let tot_merge_items:usize = maps.iter().map(|m| m.len()).sum();
     merge_status.total.store(tot_merge_items, std::sync::atomic::Ordering::Relaxed);
     merge_status.current.store(0, std::sync::atomic::Ordering::Relaxed);
-    if maps.is_empty() { return MyMap::new(); }
+    if maps.is_empty() { return MyMap::default(); }
     if maps.len() == 1 { return maps.remove(0); }
 
     // Pairwise merge function (sequential for a pair)
@@ -449,33 +447,31 @@ pub fn sum_maps(maps: &mut Vec<MyMap>, verbose: usize, cfg: &CliCfg, merge_statu
             let right = working.pop().unwrap();
             let left = working.pop().unwrap();
             working.push(merge_pair(left, right));
-        } else {
-            if use_parallel {
-                working = working
-                    .par_chunks_mut(2)
-                    .map(|chunk| {
-                        if chunk.len() == 2 {
-                            let right = std::mem::take(&mut chunk[1]);
-                            let left = std::mem::take(&mut chunk[0]);
-                            merge_pair(left, right)
-                        } else {
-                            std::mem::take(&mut chunk[0])
-                        }
-                    })
-                    .collect();
-            } else {
-                // Sequential pairwise merge for small workloads
-                let mut next: Vec<MyMap> = Vec::with_capacity((working.len()+1)/2);
-                let mut iter = working.into_iter();
-                while let Some(left) = iter.next() {
-                    if let Some(right) = iter.next() {
-                        next.push(merge_pair(left, right));
+        } else if use_parallel {
+            working = working
+                .par_chunks_mut(2)
+                .map(|chunk| {
+                    if chunk.len() == 2 {
+                        let right = std::mem::take(&mut chunk[1]);
+                        let left = std::mem::take(&mut chunk[0]);
+                        merge_pair(left, right)
                     } else {
-                        next.push(left);
+                        std::mem::take(&mut chunk[0])
                     }
+                })
+                .collect();
+        } else {
+            // Sequential pairwise merge for small workloads
+            let mut next: Vec<MyMap> = Vec::with_capacity(working.len().div_ceil(2));
+            let mut iter = working.into_iter();
+            while let Some(left) = iter.next() {
+                if let Some(right) = iter.next() {
+                    next.push(merge_pair(left, right));
+                } else {
+                    next.push(left);
                 }
-                working = next;
             }
+            working = next;
         }
     }
     let result = working.pop().unwrap_or_default();

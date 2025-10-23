@@ -392,6 +392,7 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
                 eprintln!("Override thread number to 1 since you have multiple [{}] REs listed ", cfg.re_str.len());
             }
         }
+    #[cfg(dev_tools)]
         fn re_map(v: usize) -> Result<usize> {
             if v == 0 { Err("Field indices must start at base 1".to_string())?; }
             Ok(v - 1)
@@ -423,7 +424,7 @@ pub fn get_cli() -> Result<Arc<CliCfg>> {
             }
             // early checks for name usage
             if !names.is_empty() {
-                if cfg.re_str.len() > 0 {
+                if !cfg.re_str.is_empty() {
                     Err("Header name selectors (-k) are not supported in regex mode yet; use numeric indices.".to_string())?;
                 }
                 if !cfg.skip_header {
