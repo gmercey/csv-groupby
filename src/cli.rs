@@ -45,93 +45,164 @@ lazy_static! {
 /// Note that -l, -f, and -i define where data comes from.  If none of these options
 /// is given then it default to reading stdin.
 pub struct CliCfg {
+    /// One-off regex to test against `-L` lines (prints matched capture groups and exits).
     #[arg(short='R', long="test_re")] pub testre: Option<String>,
+    /// One or more input lines used with `-R` to show regex subgroup matches.
     #[arg(short='L', long="test_line")] pub testlines: Vec<String>,
-    // Overloaded key field selectors: numeric indices (1-based) OR header names.
-    // Parsed initially as raw strings; resolved later (lazy) after header read.
+    /// Fields that will act as group-by keys. Accepts comma-separated 1-based indices or header names.
     #[arg(short='k', long="key_fields", value_delimiter=',')] pub raw_key_fields: Vec<String>,
     // INTERNAL (initialized post-parse)
+    /// Resolved 0-based key field indices (filled after header resolution).
     #[clap(skip)] pub key_fields_idx: RwLock<Vec<usize>>,
+    /// Name tokens supplied by the user for name-based selection (pending resolution).
     #[clap(skip)] pub key_field_names: Vec<String>,
+    /// Whether name-based key fields have been resolved to indices.
     #[clap(skip)] pub key_fields_resolved: AtomicBool,
+    /// Mapping of resolved index -> header name (used for labeled output).
     #[clap(skip)] pub key_index_names: RwLock<HashMap<usize,String>>, // map of resolved index -> header name
-    // Unique values (distinct counts) support numeric indices OR header names
+    /// Fields to count distinct (unique) values. Accepts indices or header names.
     #[arg(short='u', long="unique_values", value_delimiter=',')] pub raw_unique_fields: Vec<String>,
+    /// Resolved unique field indices (0-based).
     #[clap(skip)] pub unique_fields: Vec<usize>,
+    /// Name tokens for unique fields (pending resolution).
     #[clap(skip)] pub unique_field_names: Vec<String>,
-    // Distribution write-out fields (subset of unique fields) allow names too
+    /// Fields for which to write value distributions (subset of `-u`); accepts indices or names.
     #[arg(short='D', long="write_distros", value_delimiter=',')] pub raw_write_distros: Vec<String>,
+    /// Resolved distro field indices.
     #[clap(skip)] pub write_distros: Vec<usize>,
+    /// Name tokens for distro fields (pending resolution).
     #[clap(skip)] pub write_distro_field_names: Vec<String>,
+    /// How many top values to show in distributions (default 5).
     #[arg(long="write_distros_upper", default_value_t=5)] pub write_distros_upper: usize,
+    /// How many bottom values to show in distributions (default 2).
     #[arg(long="write_distros_bottom", default_value_t=2)] pub write_distros_bottom: usize,
-    // Aggregates: allow numeric indices OR header names (resolved post header like keys)
+    /// Sum (numeric) fields to aggregate; accepts indices or header names.
     #[arg(short='s', long="sum_values", value_delimiter=',')] pub raw_sum_fields: Vec<String>,
+    /// Average (numeric) fields; accepts indices or header names.
     #[arg(short='a', long="avg_values", value_delimiter=',')] pub raw_avg_fields: Vec<String>,
+    /// Resolved 0-based sum field indices.
     #[clap(skip)] pub sum_fields: Vec<usize>,
+    /// Resolved 0-based avg field indices.
     #[clap(skip)] pub avg_fields: Vec<usize>,
+    /// Name tokens for sums (pending resolution).
     #[clap(skip)] pub sum_field_names: Vec<String>,
+    /// Name tokens for avgs (pending resolution).
     #[clap(skip)] pub avg_field_names: Vec<String>,
-    // Numeric min/max; string min/max: support names
+    /// Max numeric fields; accepts indices or header names.
     #[arg(short='x', long="max_nums", value_delimiter=',')] pub raw_max_num_fields: Vec<String>,
+    /// Resolved max numeric field indices.
     #[clap(skip)] pub max_num_fields: Vec<usize>,
+    /// Name tokens for max numeric fields (pending resolution).
     #[clap(skip)] pub max_num_field_names: Vec<String>,
+    /// Min numeric fields; accepts indices or header names.
     #[arg(short='n', long="min_nums", value_delimiter=',')] pub raw_min_num_fields: Vec<String>,
+    /// Resolved min numeric field indices.
     #[clap(skip)] pub min_num_fields: Vec<usize>,
+    /// Name tokens for min numeric fields (pending resolution).
     #[clap(skip)] pub min_num_field_names: Vec<String>,
+    /// Max string fields; accepts indices or header names.
     #[arg(short='X', long="max_strings", value_delimiter=',')] pub raw_max_str_fields: Vec<String>,
+    /// Resolved max string field indices.
     #[clap(skip)] pub max_str_fields: Vec<usize>,
+    /// Name tokens for max string fields (pending resolution).
     #[clap(skip)] pub max_str_field_names: Vec<String>,
+    /// Min string fields; accepts indices or header names.
     #[arg(short='N', long="min_strings", value_delimiter=',')] pub raw_min_str_fields: Vec<String>,
+    /// Resolved min string field indices.
     #[clap(skip)] pub min_str_fields: Vec<usize>,
+    /// Name tokens for min string fields (pending resolution).
     #[clap(skip)] pub min_str_field_names: Vec<String>,
+    /// Field aliases in the form index:name (useful for output labels).
     #[arg(short='A', long="field_aliases", value_delimiter=',', value_parser=parse_alias)] pub field_aliases: Option<Vec<(usize,String)>>,
     // Aggregation specs (constructed post name resolution) for unified numeric ops
+    /// Generated numeric aggregation specs (internal); populated by `build_specs()`.
     #[clap(skip)] pub num_specs: Vec<NumAggSpec>,
+    /// Generated string aggregation specs (internal); populated by `build_specs()`.
     #[clap(skip)] pub str_specs: Vec<StrAggSpec>,
+    /// Generated avg aggregation specs (internal); populated by `build_specs()`.
     #[clap(skip)] pub avg_specs: Vec<AvgAggSpec>,
+    /// Regular expression(s) to parse lines into fields (regex mode).
     #[arg(short='r', long="regex")] pub re_str: Vec<String>,
+    /// Regex used to extract path segments when processing filenames.
     #[arg(short='p', long="path_re")] pub re_path: Option<String>,
+    /// Quick grep-like filter: only process lines containing this pattern (requires -r).
     #[arg(long="re_line_contains")] pub re_line_contains: Option<String>,
+    /// Input delimiter character for CSV mode (supports escapes like `\t`, `\0`, or `\dNN`).
     #[arg(short='d', long="input_delimiter", value_parser=parse_escape, default_value=",")] pub delimiter: char,
+    /// CSV quote character (single byte) or escape like `\t`.
     #[arg(short='q', long="quote", value_parser=parse_escape)] pub quote: Option<char>,
+    /// CSV escape character for quoted fields.
     #[arg(short='e', long="escape", value_parser=parse_escape)] pub escape: Option<char>,
+    /// CSV comment character; lines starting with this char are skipped.
     #[arg(short='C', long="comment", value_parser=parse_escape)] pub comment: Option<char>,
+    /// Output delimiter for written summaries (default is comma).
     #[arg(short='o', long="output_delimiter", default_value=",")] pub od: String,
+    /// Write delimited CSV output instead of aligned table.
     #[arg(short='c', long="csv_output")] pub csv_output: bool,
+    /// Increase verbosity (repeatable `-v`).
     #[arg(short='v', action=ArgAction::Count)] pub verbose: u8,
+    /// Treat the first input line as a header and resolve name-based selectors.
     #[arg(long="skip_header")] pub skip_header: bool,
+    /// Do not write record count column in the output.
     #[arg(long="no_record_count")] pub no_record_count: bool,
+    /// Substitute this string for empty fields in output (default empty string).
     #[arg(long="empty_string", default_value="")] pub empty: String,
+    /// Number of parser threads to spawn.
     #[arg(short='t', long="parse_threads", default_value_t = get_default_parse_thread_no() as u64)] pub parse_threads: u64,
+    /// Number of IO threads to spawn for file processing.
     #[arg(short='I', long="io_threads", default_value_t = get_default_io_thread_no() as u64)] pub io_threads: u64,
+    /// Number of preallocated IO blocks to queue between threads.
     #[arg(long="queue_size", default_value_t = get_default_queue_size())] pub thread_qsize: usize,
+    /// Path queue size for IO slicer (0 = unbounded).
     #[arg(long="path_qsize", default_value_t = 0)] pub path_qsize: usize,
+    /// No-op processing mode: parse nothing and exit (test harness use).
     #[arg(long="noop_proc")] pub noop_proc: bool,
+    /// Size for IO block reads (human format: 256K, 1M, etc.). Only valid in file mode.
     #[arg(long="io_block_size", value_parser=parse_human_size, default_value_t = 0)] pub io_block_size: usize,
+    /// Queue block size between IO thread and workers (default 256K).
     #[arg(long="q_block_size", value_parser=parse_human_size, default_value="256K")] pub q_block_size: usize,
+    /// Path to a file that lists input file paths (one per line).
     #[arg(short='l', long="file_list")] pub file_list: Option<PathBuf>,
+    /// Read a list of file paths from stdin instead of reading stdin data.
     #[arg(short='i', long="stdin_file_list")] pub stdin_file_list: bool,
-    // Accept one or more file values after a single -f like: -f file1 file2
+    /// One or more input files to process.
     #[arg(short='f', long="file", num_args=1..)] pub files: Vec<PathBuf>,
+    /// Recursively walk a directory and process matching files.
     #[arg(short='w', long="walk")] pub walk: Option<String>,
+    /// Print periodic stats ticker while processing.
     #[arg(long="stats")] pub stats: bool,
+    /// Skip writing the final summary output (useful for dry-run / perf tests).
     #[arg(long="no_output")] pub no_output: bool,
+    /// Disable IO block reuse (avoid recycling buffers).
     #[arg(long="recycle_io_blocks_disable")] pub recycle_io_blocks_disable: bool,
+    /// Do not sort keys before output (faster but non-deterministic order unless explicitly sorted later).
     #[arg(long="disable_key_sort")] pub disable_key_sort: bool,
+    /// String used to represent empty fields in output (default "NULL").
     #[arg(long="null_write", default_value="NULL")] pub null: String,
+    /// Emit memory statistics about distinct stores after output completes.
     #[arg(long="mem_stats")] pub mem_stats: bool,
+    /// Interpret input as ISO-8859 encoded (legacy support).
     #[allow(non_snake_case)]
     #[arg(long="ISO-8859")] pub iso_8859: bool,
+    /// Sample schema: emit a sample schema for the first N records and exit.
     #[arg(long="sample_schema")] pub sample_schema: Option<u32>,
+    /// Conditional include: only process records matching these field:regex pairs.
     #[arg(long="where_re", value_parser=parse_field_and_regex)] pub where_re: Option<Vec<(usize,Regex_pre2)>>,
+    /// Conditional exclude: skip records matching these field:regex pairs.
     #[arg(long="where_not_re", value_parser=parse_field_and_regex)] pub where_not_re: Option<Vec<(usize,Regex_pre2)>>,
+    /// Emit only the first N output lines.
     #[arg(long="head")] pub head: Option<u64>,
+    /// Emit only the last N output lines.
     #[arg(long="tail")] pub tail: Option<u64>,
+    /// Sort by count descending before output.
     #[arg(long="count_dsc")] pub count_dsc: bool,
+    /// Sort by count ascending before output.
     #[arg(long="count_asc")] pub count_asc: bool,
+    /// Select groups with count >= this value (note: CLI flag name is count_ge).
     #[arg(long="count_ge")] pub count_le: Option<u64>,
+    /// Select groups with count <= this value (note: CLI flag name is count_le).
     #[arg(long="count_le")] pub count_ge: Option<u64>,
+    /// Print the small usage examples and exit.
     #[arg(short='E', long="print_examples")] pub print_examples: bool,
 }
 
@@ -174,16 +245,16 @@ fn print_examples() {
 
 File sources:
 
-cat it.csv | gb -k 1,2 -s 4  # reads from standard-in
+cat it.csv | gb -k key_field1,key_field2 -s value_field  # reads from standard-in
 find . | gb -i ....          # reads from files piped to standard in
 gb -f file1 fil2....         # read from specified files
 gb -l <file_list> ....       # reads from files in a list file
 gb -w /some/path -p '.*.csv' # read all files under directory that end in .csv
 Fields:
 
-gb -f file1 -k 2 -s 3 -a 4 -u 5 --write_distros 5
-# reads csv file1 and does a select.. group by 2
-# sum field 3;  avg field 4; write value count distro for field 5
+gb -f file1 -k key_field -s sum_field -a avg_field -u uniq_field --write_distros uniq_field
+# reads csv file1 and does a select.. group by key_field
+# sum_field summed; avg_field averaged; uniq_field counted distinct with distro output
 
 ver: {}\n", env!("BUILD_GIT_HASH"));
 }
